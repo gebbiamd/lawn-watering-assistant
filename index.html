@@ -271,6 +271,14 @@ const PAST_DAYS = 7;
 const FORECAST_DAYS = 5;
 const MOISTURE_DECAY = 0.75;
 
+// Prolonged nighttime leaf wetness is the single biggest driver of turf fungal
+// disease (brown patch, dollar spot, pythium) — NC State/Purdue extension work
+// puts the infection threshold at 10-12+ continuous wet hours, and watering
+// after ~6pm roughly doubles the overnight wet window vs. an early-morning
+// soak that dries by midday. 6-10am is the standard recommended window.
+const WATERING_WINDOW_START_HOUR = 6;  // 6:00 AM
+const QUIET_HOURS_START_HOUR = 20;     // 8:00 PM — no new deep-soak watering after this
+
 // Validated categorical pair (blue + aqua, both in inches — one shared axis).
 const CHART_COLOR_RAIN = '#2a78d6';
 const CHART_COLOR_MOISTURE = '#1baf7a';
@@ -282,12 +290,13 @@ const URGENCY_SOON_PCT = 20; // below this % remaining in the interval, start wa
 const STATUS_META = {
   skip_rain:         { emoji: '🔵', label: 'SKIP - RAIN FORECASTED',      color: 'blue' },
   skip_saturated:    { emoji: '🔵', label: 'SKIP WATERING',                color: 'blue' },
+  hold_until_morning:{ emoji: '🌙', label: 'Hold Until Morning',           color: 'orange' },
   water_now_critical:{ emoji: '🔴', label: 'Critically Dry — Water Now',   color: 'red' },
   water_now:         { emoji: '🟠', label: 'Water Now',                    color: 'orange' },
   water_soon:        { emoji: '🟡', label: 'Water Soon',                   color: 'yellow' },
   on_track:          { emoji: '🟢', label: 'On Track',                     color: 'green' },
 };
-const NOTIFIABLE_KEYS = new Set(['water_now_critical', 'water_now', 'water_soon', 'skip_rain', 'skip_saturated']);
+const NOTIFIABLE_KEYS = new Set(['water_now_critical', 'water_now', 'water_soon', 'hold_until_morning', 'skip_rain', 'skip_saturated']);
 const PILL_CLASSES = {
   green:  'bg-emerald-50 ring-emerald-200 text-emerald-800',
   yellow: 'bg-amber-50 ring-amber-200 text-amber-800',
@@ -454,12 +463,19 @@ function computeStatus(settings, phaseInfo, metrics, schedule) {
     ? (overdueHours > schedule.intervalHours * 0.5 ? 'critical' : 'now')
     : (pct < URGENCY_SOON_PCT ? 'soon' : 'ok');
 
+  // Root Development / Establishment do a real deep soak — the kind that keeps
+  // blades wet for hours. Germination's misting is brief and dries fast, and
+  // delaying it risks the seed itself, so it's exempt from this rule.
+  if (phase !== 1 && (urgency === 'critical' || urgency === 'now') && isQuietHour(new Date())) {
+    return { key: 'hold_until_morning', detail: `Soil needs water, but watering overnight extends leaf wetness and raises disease risk. Water first thing at ${formatNextDue(schedule.recommendedAt)}.` };
+  }
+
   if (phase === 1) {
     if (urgency === 'critical' || urgency === 'now') {
       return { key: urgency === 'critical' ? 'water_now_critical' : 'water_now', detail: 'Keep the top ½" of soil moist — short 5–10 min mist now.' };
     }
     if (urgency === 'soon') {
-      return { key: 'water_soon', detail: `Top layer is starting to dry — mist again ${formatNextDue(schedule.nextDueAt)}.` };
+      return { key: 'water_soon', detail: `Top layer is starting to dry — mist again ${formatNextDue(schedule.recommendedAt)}.` };
     }
     return { key: 'on_track', detail: `Soil moist — ${metrics.combined8h.toFixed(2)}" in the last ${MOISTURE_LOOKBACK_HOURS}h.` };
   }
@@ -470,7 +486,7 @@ function computeStatus(settings, phaseInfo, metrics, schedule) {
       return { key: urgency === 'critical' ? 'water_now_critical' : 'water_now', detail: `${metrics.combined24h.toFixed(2)}" today so far — target ${dailyTarget.toFixed(2)}", time for a deeper session.` };
     }
     if (urgency === 'soon') {
-      return { key: 'water_soon', detail: `Approaching today's watering window — due ${formatNextDue(schedule.nextDueAt)}.` };
+      return { key: 'water_soon', detail: `Approaching today's watering window — due ${formatNextDue(schedule.recommendedAt)}.` };
     }
     return { key: 'on_track', detail: `${metrics.combined24h.toFixed(2)}" today so far — on pace for ${settings.root_dev_weekly_inches}"/wk.` };
   }
@@ -481,7 +497,7 @@ function computeStatus(settings, phaseInfo, metrics, schedule) {
     return { key: urgency === 'critical' ? 'water_now_critical' : 'water_now', detail: `${deficit.toFixed(2)}" still needed this week (${metrics.combinedWeek.toFixed(2)}" / ${settings.weekly_target_inches}").` };
   }
   if (urgency === 'soon') {
-    return { key: 'water_soon', detail: `Approaching this week's watering window — due ${formatNextDue(schedule.nextDueAt)}.` };
+    return { key: 'water_soon', detail: `Approaching this week's watering window — due ${formatNextDue(schedule.recommendedAt)}.` };
   }
   return { key: 'on_track', detail: `${metrics.combinedWeek.toFixed(2)}" of ${settings.weekly_target_inches}" this week.` };
 }
@@ -528,7 +544,40 @@ function computeSchedule(settings, phaseInfo, weather, logs) {
   const nextDueAt = lastWetAt
     ? new Date(lastWetAt.getTime() + intervalHours * 3600 * 1000)
     : new Date();
-  return { intervalHours, sessionAmountInches, lastWetAt, nextDueAt };
+  const recommendedAt = applyWateringWindow(nextDueAt, phaseInfo.phase);
+  return { intervalHours, sessionAmountInches, lastWetAt, nextDueAt, recommendedAt };
+}
+
+// Is `date`'s local clock time inside the 8pm-6am disease-risk window?
+function isQuietHour(date) {
+  const h = date.getHours();
+  return h >= QUIET_HOURS_START_HOUR || h < WATERING_WINDOW_START_HOUR;
+}
+
+function nextWindowStart(from) {
+  const d = new Date(from);
+  d.setHours(WATERING_WINDOW_START_HOUR, 0, 0, 0);
+  if (d <= from) d.setDate(d.getDate() + 1);
+  return d;
+}
+
+// Nudges a *predicted* watering time away from the overnight disease-risk
+// window. Germination is exempt when the session is already due/overdue —
+// a few hours without moisture risks the seed itself, which outweighs the
+// (much lower) disease risk from a brief, quick-drying mist.
+function applyWateringWindow(dueAt, phase) {
+  if (phase === 1) {
+    if (dueAt <= new Date()) return dueAt;
+    const h = dueAt.getHours();
+    if (h >= 22 || h < 5) {
+      const snapped = new Date(dueAt);
+      snapped.setHours(5, 30, 0, 0);
+      if (snapped < dueAt) snapped.setDate(snapped.getDate() + 1);
+      return snapped;
+    }
+    return dueAt;
+  }
+  return isQuietHour(dueAt) ? nextWindowStart(dueAt) : dueAt;
 }
 
 function formatDuration(hours) {
@@ -574,7 +623,7 @@ function formatAmount(inches, ratePerHour) {
 function buildNotifications(settings, phaseInfo, metrics, status, recentAlerts, weather, todayIdx, schedule) {
   const items = [];
   const meta = STATUS_META[status.key];
-  items.push(`${meta.emoji} ${meta.label} — ${status.detail} Next: ${formatNextDue(schedule.nextDueAt)} — ${formatAmount(schedule.sessionAmountInches, settings.sprinkler_rate_inches_per_hour)}.`);
+  items.push(`${meta.emoji} ${meta.label} — ${status.detail} Next: ${formatNextDue(schedule.recommendedAt)} — ${formatAmount(schedule.sessionAmountInches, settings.sprinkler_rate_inches_per_hour)}.`);
 
   if (metrics.forecastToday > RAIN_FORECAST_THRESHOLD && status.key !== 'skip_rain') {
     items.push(`🌧️ Heads up: ${metrics.forecastToday.toFixed(2)}" of rain still forecasted later today.`);
@@ -734,7 +783,7 @@ function renderDashboard(settings, phaseInfo, metrics, status, schedule) {
   document.getElementById('status-emoji').textContent = meta.emoji;
   document.getElementById('status-label').textContent = meta.label;
   document.getElementById('status-detail').textContent = status.detail;
-  document.getElementById('status-next').textContent = `📅 Next watering: ${formatNextDue(schedule.nextDueAt)} — ${formatAmount(schedule.sessionAmountInches, settings.sprinkler_rate_inches_per_hour)}`;
+  document.getElementById('status-next').textContent = `📅 Next watering: ${formatNextDue(schedule.recommendedAt)} — ${formatAmount(schedule.sessionAmountInches, settings.sprinkler_rate_inches_per_hour)}`;
 
   const cards = document.getElementById('dashboard-cards');
   cards.innerHTML = '';
@@ -783,16 +832,19 @@ function renderMoistureGauge(schedule) {
   let fillColor, bulbColor, labelColor, labelText;
   if (overdueHours > 0) {
     fillColor = 'bg-red-400'; bulbColor = 'bg-red-500'; labelColor = 'text-red-600';
-    labelText = critical ? 'Critically Dry' : 'Water Needed';
-    sub.textContent = `Overdue by ${formatDuration(overdueHours)}`;
+    const deferred = schedule.recommendedAt > new Date();
+    labelText = deferred ? 'Hold Until Morning' : (critical ? 'Critically Dry' : 'Water Needed');
+    sub.textContent = deferred
+      ? `Overdue by ${formatDuration(overdueHours)} — water ${formatNextDue(schedule.recommendedAt)}`
+      : `Overdue by ${formatDuration(overdueHours)}`;
   } else if (pct >= 50) {
     fillColor = 'bg-emerald-400'; bulbColor = 'bg-emerald-500'; labelColor = 'text-emerald-700';
     labelText = 'Moist';
-    sub.textContent = `Next watering ${formatNextDue(schedule.nextDueAt)}`;
+    sub.textContent = `Next watering ${formatNextDue(schedule.recommendedAt)}`;
   } else {
     fillColor = 'bg-amber-400'; bulbColor = 'bg-amber-500'; labelColor = 'text-amber-700';
     labelText = 'Getting Dry';
-    sub.textContent = `Next watering ${formatNextDue(schedule.nextDueAt)}`;
+    sub.textContent = `Next watering ${formatNextDue(schedule.recommendedAt)}`;
   }
 
   fill.className = `absolute bottom-0 left-0 right-0 rounded-full transition-all duration-700 ease-out ${fillColor}`;
@@ -1119,6 +1171,7 @@ async function refreshAll() {
 
 function maybeNotify(status) {
   if (!NOTIFIABLE_KEYS.has(status.key)) return;
+  if (isQuietHour(new Date())) return; // don't ping the phone overnight either
   if (!('Notification' in window) || Notification.permission !== 'granted') return;
   const today = new Date().toDateString();
   const lastKey = localStorage.getItem('lastNotifiedStatusKey');

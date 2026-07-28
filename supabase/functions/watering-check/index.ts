@@ -24,16 +24,25 @@ const MOISTURE_LOOKBACK_THRESHOLD = 0.05;
 const DEDUPE_WINDOW_HOURS = 4;
 const URGENCY_SOON_PCT = 20;
 
+// Prolonged nighttime leaf wetness is the single biggest driver of turf fungal
+// disease (brown patch, dollar spot, pythium) — NC State/Purdue extension work
+// puts the infection threshold at 10-12+ continuous wet hours, and watering
+// after ~6pm roughly doubles the overnight wet window. 6-10am is the standard
+// recommended window.
+const WATERING_WINDOW_START_HOUR = 6;  // 6:00 AM
+const QUIET_HOURS_START_HOUR = 20;     // 8:00 PM
+
 const STATUS_META: Record<string, { emoji: string; label: string }> = {
   skip_rain:          { emoji: '🔵', label: 'SKIP - RAIN FORECASTED' },
   skip_saturated:     { emoji: '🔵', label: 'SKIP WATERING' },
+  hold_until_morning: { emoji: '🌙', label: 'Hold Until Morning' },
   water_now_critical: { emoji: '🔴', label: 'Critically Dry — Water Now' },
   water_now:          { emoji: '🟠', label: 'Water Now' },
   water_soon:         { emoji: '🟡', label: 'Water Soon' },
   on_track:           { emoji: '🟢', label: 'On Track' },
 };
 const NOTIFIABLE_KEYS = new Set([
-  'water_now_critical', 'water_now', 'water_soon', 'skip_rain', 'skip_saturated',
+  'water_now_critical', 'water_now', 'water_soon', 'hold_until_morning', 'skip_rain', 'skip_saturated',
 ]);
 
 function getPhase(settings: any) {
@@ -99,7 +108,7 @@ function computeMoistureLevel(schedule: { lastWetAt: Date | null; intervalHours:
 // signal the app's moisture gauge uses, so the emailed status can never say
 // "skip" for a routine near-due check — that word is reserved for the two
 // genuine over-hydration cases (rain forecast, 48h saturation).
-function computeStatus(settings: any, phaseInfo: any, metrics: any, schedule: any) {
+function computeStatus(settings: any, phaseInfo: any, metrics: any, schedule: any, tz: string) {
   const { phase } = phaseInfo;
 
   if (metrics.forecastToday > RAIN_FORECAST_THRESHOLD && metrics.forecastProbability >= RAIN_PROBABILITY_GATE_PCT) {
@@ -114,6 +123,13 @@ function computeStatus(settings: any, phaseInfo: any, metrics: any, schedule: an
   const urgency = overdueHours > 0
     ? (overdueHours > schedule.intervalHours * 0.5 ? 'critical' : 'now')
     : (pct < URGENCY_SOON_PCT ? 'soon' : 'ok');
+
+  // Root Development / Establishment do a real deep soak — the kind that keeps
+  // blades wet for hours. Germination's misting is brief and dries fast, and
+  // delaying it risks the seed itself, so it's exempt from this rule.
+  if (phase !== 1 && (urgency === 'critical' || urgency === 'now') && isQuietHour(new Date(), tz)) {
+    return { key: 'hold_until_morning', detail: `Soil needs water, but watering overnight extends leaf wetness and raises disease risk. Water first thing at ${formatNextDue(schedule.recommendedAt, tz)}.` };
+  }
 
   if (phase === 1) {
     if (urgency === 'critical' || urgency === 'now') {
@@ -161,7 +177,7 @@ function computeLastWetAt(weather: any, logs: any[]) {
   return candidates.length ? new Date(Math.max(...candidates)) : null;
 }
 
-function computeSchedule(settings: any, phaseInfo: any, weather: any, logs: any[]) {
+function computeSchedule(settings: any, phaseInfo: any, weather: any, logs: any[], tz: string) {
   const lastWetAt = computeLastWetAt(weather, logs);
   let intervalHours: number, sessionAmountInches: number;
 
@@ -183,7 +199,64 @@ function computeSchedule(settings: any, phaseInfo: any, weather: any, logs: any[
   const nextDueAt = lastWetAt
     ? new Date(lastWetAt.getTime() + intervalHours * 3600 * 1000)
     : new Date();
-  return { intervalHours, sessionAmountInches, lastWetAt, nextDueAt };
+  const recommendedAt = applyWateringWindow(nextDueAt, phaseInfo.phase, tz);
+  return { intervalHours, sessionAmountInches, lastWetAt, nextDueAt, recommendedAt };
+}
+
+// How far tz's local wall clock is ahead of UTC, in minutes, at `date`.
+function tzOffsetMinutes(date: Date, tz: string) {
+  const dtf = new Intl.DateTimeFormat('en-US', {
+    timeZone: tz, hourCycle: 'h23',
+    year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', second: '2-digit',
+  });
+  const parts: Record<string, string> = {};
+  for (const p of dtf.formatToParts(date)) parts[p.type] = p.value;
+  const asUTC = Date.UTC(+parts.year, +parts.month - 1, +parts.day, +parts.hour, +parts.minute, +parts.second);
+  return (asUTC - date.getTime()) / 60000;
+}
+
+function localHour(date: Date, tz: string) {
+  return parseInt(new Intl.DateTimeFormat('en-US', { timeZone: tz, hour: '2-digit', hourCycle: 'h23' }).format(date), 10);
+}
+
+function isQuietHour(date: Date, tz: string) {
+  const h = localHour(date, tz);
+  return h >= QUIET_HOURS_START_HOUR || h < WATERING_WINDOW_START_HOUR;
+}
+
+// Builds a UTC Date instant for `hour`:00 local time (in tz) on the same local
+// calendar day as `from`, using tz's offset at that moment.
+function localTimeOnDate(from: Date, tz: string, hour: number, minute: number) {
+  const dtf = new Intl.DateTimeFormat('en-US', { timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit' });
+  const parts: Record<string, string> = {};
+  for (const p of dtf.formatToParts(from)) parts[p.type] = p.value;
+  const offsetMin = tzOffsetMinutes(from, tz);
+  return new Date(Date.UTC(+parts.year, +parts.month - 1, +parts.day, hour, minute, 0) - offsetMin * 60000);
+}
+
+function nextWindowStart(from: Date, tz: string) {
+  let candidate = localTimeOnDate(from, tz, WATERING_WINDOW_START_HOUR, 0);
+  if (candidate <= from) candidate = new Date(candidate.getTime() + 24 * 3600 * 1000);
+  return candidate;
+}
+
+// Nudges a *predicted* watering time away from the overnight disease-risk
+// window. Germination is exempt when the session is already due/overdue —
+// a few hours without moisture risks the seed itself, which outweighs the
+// (much lower) disease risk from a brief, quick-drying mist.
+function applyWateringWindow(dueAt: Date, phase: number, tz: string) {
+  if (phase === 1) {
+    if (dueAt <= new Date()) return dueAt;
+    const h = localHour(dueAt, tz);
+    if (h >= 22 || h < 5) {
+      let snapped = localTimeOnDate(dueAt, tz, 5, 30);
+      if (snapped < dueAt) snapped = new Date(snapped.getTime() + 24 * 3600 * 1000);
+      return snapped;
+    }
+    return dueAt;
+  }
+  return isQuietHour(dueAt, tz) ? nextWindowStart(dueAt, tz) : dueAt;
 }
 
 function formatDuration(hours: number) {
@@ -260,9 +333,10 @@ Deno.serve(async (req: Request) => {
     const weatherRes = await fetch(weatherUrl);
     const weather = await weatherRes.json();
 
+    const tz = weather.timezone || 'UTC';
     const metrics = computeMetrics(weather, logs || []);
-    const schedule = computeSchedule(settings, phaseInfo, weather, logs || []);
-    const status = computeStatus(settings, phaseInfo, metrics, schedule);
+    const schedule = computeSchedule(settings, phaseInfo, weather, logs || [], tz);
+    const status = computeStatus(settings, phaseInfo, metrics, schedule, tz);
 
     if (!NOTIFIABLE_KEYS.has(status.key)) {
       return Response.json({ ok: true, sent: false, reason: 'status not actionable', status: status.key });
@@ -284,8 +358,7 @@ Deno.serve(async (req: Request) => {
     }
 
     const meta = STATUS_META[status.key];
-    const tz = weather.timezone || 'UTC';
-    const nextDueText = `Next watering: ${formatNextDue(schedule.nextDueAt, tz)} — ${formatAmount(schedule.sessionAmountInches, settings.sprinkler_rate_inches_per_hour)}`;
+    const nextDueText = `Next watering: ${formatNextDue(schedule.recommendedAt, tz)} — ${formatAmount(schedule.sessionAmountInches, settings.sprinkler_rate_inches_per_hour)}`;
     const subject = `${meta.emoji} ${meta.label} — Day ${phaseInfo.daysSince} (${phaseName(phaseInfo.phase)})`;
     const html = `<p><strong>${meta.emoji} ${meta.label}</strong></p><p>${status.detail}</p><p>${nextDueText}</p><p style="color:#64748b;font-size:13px">Day ${phaseInfo.daysSince} of establishment · ${phaseName(phaseInfo.phase)} phase</p>`;
 
