@@ -1,0 +1,689 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="default" />
+<meta name="apple-mobile-web-app-title" content="Lawn Water" />
+<meta name="theme-color" content="#ecfdf5" />
+<title>Smart Lawn Watering Assistant</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<style>
+  html, body { background: #f0fdf4; overscroll-behavior-y: none; }
+  ::-webkit-scrollbar { display: none; }
+  * { -webkit-tap-highlight-color: transparent; }
+  .safe-top { padding-top: max(1rem, env(safe-area-inset-top)); }
+  .safe-bottom { padding-bottom: max(1.5rem, env(safe-area-inset-bottom)); }
+  .card { background: #ffffff; border: 1px solid rgba(15,23,42,.06); box-shadow: 0 1px 2px rgba(15,23,42,.04), 0 12px 28px -16px rgba(15,23,42,.12); }
+  .modal-enter { animation: slideUp .2s ease-out; }
+  @keyframes slideUp { from { transform: translateY(24px); opacity: 0 } to { transform: translateY(0); opacity: 1 } }
+</style>
+</head>
+<body class="min-h-screen text-slate-800 antialiased bg-gradient-to-b from-emerald-50 via-white to-sky-50">
+
+<div class="fixed inset-0 -z-10 overflow-hidden pointer-events-none">
+  <div class="absolute -top-24 -left-20 w-72 h-72 bg-emerald-200/40 rounded-full blur-3xl"></div>
+  <div class="absolute -top-16 -right-24 w-72 h-72 bg-sky-200/40 rounded-full blur-3xl"></div>
+  <div class="absolute top-1/2 -left-16 w-72 h-72 bg-amber-100/30 rounded-full blur-3xl"></div>
+</div>
+
+<div id="root" class="mx-auto max-w-md min-h-screen flex flex-col safe-top safe-bottom px-4"></div>
+
+<!-- ===================== SETUP SCREEN TEMPLATE ===================== -->
+<template id="tpl-setup">
+  <div class="flex-1 flex flex-col gap-5 pb-10">
+    <div class="pt-2">
+      <h1 class="text-2xl font-bold tracking-tight text-slate-900">🌱 Lawn Setup</h1>
+      <p class="text-slate-500 text-sm mt-1">Tell us about your new lawn so we can tailor the watering plan.</p>
+    </div>
+
+    <div class="card rounded-3xl p-4 flex flex-col gap-4">
+      <label class="flex flex-col gap-1.5">
+        <span class="text-sm font-semibold text-slate-700">Seed / sod date</span>
+        <input id="in-seed-date" type="date" class="bg-slate-50 rounded-xl px-3 py-2.5 text-slate-800 outline-none ring-1 ring-slate-200 focus:ring-2 focus:ring-emerald-400" />
+      </label>
+
+      <label class="flex flex-col gap-1.5">
+        <span class="text-sm font-semibold text-slate-700">Grass type</span>
+        <select id="in-grass-type" class="bg-slate-50 rounded-xl px-3 py-2.5 text-slate-800 outline-none ring-1 ring-slate-200 focus:ring-2 focus:ring-emerald-400">
+          <option value="kentucky_bluegrass">Kentucky Bluegrass</option>
+          <option value="cool_season_other">Other Cool-Season (Fescue / Rye / Bent)</option>
+          <option value="warm_season">Warm-Season (Bermuda / Zoysia)</option>
+          <option value="custom">Custom</option>
+        </select>
+      </label>
+
+      <div class="grid grid-cols-2 gap-3">
+        <label class="flex flex-col gap-1.5">
+          <span class="text-xs font-semibold text-slate-500">Germination ends (day)</span>
+          <input id="in-phase1-end" type="number" min="1" class="bg-slate-50 rounded-xl px-3 py-2 text-slate-800 outline-none ring-1 ring-slate-200 focus:ring-2 focus:ring-emerald-400" />
+        </label>
+        <label class="flex flex-col gap-1.5">
+          <span class="text-xs font-semibold text-slate-500">Root dev. ends (day)</span>
+          <input id="in-phase2-end" type="number" min="1" class="bg-slate-50 rounded-xl px-3 py-2 text-slate-800 outline-none ring-1 ring-slate-200 focus:ring-2 focus:ring-emerald-400" />
+        </label>
+        <label class="flex flex-col gap-1.5">
+          <span class="text-xs font-semibold text-slate-500">Root dev. target (in/wk)</span>
+          <input id="in-root-target" type="number" step="0.05" min="0" class="bg-slate-50 rounded-xl px-3 py-2 text-slate-800 outline-none ring-1 ring-slate-200 focus:ring-2 focus:ring-emerald-400" />
+        </label>
+        <label class="flex flex-col gap-1.5">
+          <span class="text-xs font-semibold text-slate-500">Established target (in/wk)</span>
+          <input id="in-weekly-target" type="number" step="0.05" min="0" class="bg-slate-50 rounded-xl px-3 py-2 text-slate-800 outline-none ring-1 ring-slate-200 focus:ring-2 focus:ring-emerald-400" />
+        </label>
+      </div>
+      <p class="text-xs text-slate-400 -mt-2">Established target: 1.0" in cool spring/fall, 1.25" default, up to 1.5" in summer heat. Edit anytime.</p>
+    </div>
+
+    <div class="card rounded-3xl p-4 flex flex-col gap-4">
+      <div class="flex items-center justify-between">
+        <span class="text-sm font-semibold text-slate-700">Location</span>
+        <button id="btn-use-location" type="button" class="text-xs font-semibold text-emerald-700 bg-emerald-50 px-3 py-1.5 rounded-full ring-1 ring-emerald-100">📍 Use My Location</button>
+      </div>
+      <div class="grid grid-cols-2 gap-3">
+        <label class="flex flex-col gap-1.5">
+          <span class="text-xs font-semibold text-slate-500">Latitude</span>
+          <input id="in-lat" type="number" step="any" class="bg-slate-50 rounded-xl px-3 py-2 text-slate-800 outline-none ring-1 ring-slate-200 focus:ring-2 focus:ring-emerald-400" />
+        </label>
+        <label class="flex flex-col gap-1.5">
+          <span class="text-xs font-semibold text-slate-500">Longitude</span>
+          <input id="in-lon" type="number" step="any" class="bg-slate-50 rounded-xl px-3 py-2 text-slate-800 outline-none ring-1 ring-slate-200 focus:ring-2 focus:ring-emerald-400" />
+        </label>
+      </div>
+    </div>
+
+    <div class="card rounded-3xl p-4 flex flex-col gap-3">
+      <label class="flex flex-col gap-1.5">
+        <span class="text-sm font-semibold text-slate-700">Alert email</span>
+        <input id="in-email" type="email" placeholder="you@example.com" class="bg-slate-50 rounded-xl px-3 py-2.5 text-slate-800 outline-none ring-1 ring-slate-200 focus:ring-2 focus:ring-emerald-400" />
+      </label>
+      <p class="text-xs text-slate-400">Used by the scheduled background check to email you when it's time to water (or skip), even if you never open the app.</p>
+    </div>
+
+    <button id="btn-save-setup" class="mt-2 w-full bg-emerald-500 hover:bg-emerald-600 text-white font-bold py-3.5 rounded-2xl shadow-lg shadow-emerald-500/25 transition">Save & Continue</button>
+    <p id="setup-error" class="text-sm text-red-600 hidden"></p>
+  </div>
+</template>
+
+<!-- ===================== MAIN APP SCREEN TEMPLATE ===================== -->
+<template id="tpl-app">
+  <div class="flex-1 flex flex-col gap-5 pb-28">
+    <div class="pt-2 flex items-start justify-between">
+      <div>
+        <h1 class="text-xl font-bold tracking-tight text-slate-900">🌱 Lawn Watering</h1>
+        <p id="phase-label" class="text-slate-500 text-sm mt-0.5 font-medium">—</p>
+      </div>
+      <button id="btn-settings" class="text-slate-400 hover:text-slate-600 text-xl px-1" aria-label="Settings">⚙️</button>
+    </div>
+
+    <div id="status-pill" class="rounded-3xl px-4 py-4 flex items-center gap-3 ring-1 shadow-sm">
+      <span id="status-emoji" class="text-2xl w-12 h-12 rounded-full bg-white shadow-sm flex items-center justify-center shrink-0"></span>
+      <div>
+        <div id="status-label" class="font-bold text-base leading-tight"></div>
+        <div id="status-detail" class="text-sm opacity-75 mt-0.5"></div>
+      </div>
+    </div>
+
+    <div id="dashboard-cards" class="grid grid-cols-1 gap-3"></div>
+
+    <div class="card rounded-3xl p-4">
+      <div class="flex items-center justify-between mb-2">
+        <h2 class="font-semibold text-sm text-slate-700">🔔 Notification Center</h2>
+        <button id="btn-enable-notif" class="text-xs font-semibold text-sky-700 bg-sky-50 px-3 py-1 rounded-full ring-1 ring-sky-100">Enable Alerts</button>
+      </div>
+      <ul id="notif-list" class="flex flex-col gap-2 text-sm text-slate-600"></ul>
+    </div>
+
+    <div class="card rounded-3xl p-4">
+      <h2 class="font-semibold text-sm text-slate-700 mb-2">📜 Recent History</h2>
+      <ul id="history-list" class="flex flex-col divide-y divide-slate-100"></ul>
+    </div>
+  </div>
+
+  <button id="btn-fab" class="fixed bottom-8 right-1/2 translate-x-[9.5rem] w-14 h-14 rounded-full bg-emerald-500 text-white text-3xl font-bold shadow-xl shadow-emerald-500/40 flex items-center justify-center active:scale-95 transition" aria-label="Log water">+</button>
+</template>
+
+<!-- ===================== LOG MODAL TEMPLATE ===================== -->
+<template id="tpl-modal">
+  <div id="modal-backdrop" class="fixed inset-0 bg-slate-900/40 backdrop-blur-sm flex items-end justify-center z-50">
+    <div class="modal-enter w-full max-w-md bg-white rounded-t-3xl p-5 pb-8 ring-1 ring-slate-100 shadow-2xl">
+      <div class="w-10 h-1.5 bg-slate-200 rounded-full mx-auto mb-4"></div>
+      <h2 class="text-lg font-bold mb-4 text-slate-900">Log Water</h2>
+      <div class="flex flex-col gap-4">
+        <div class="flex gap-2">
+          <button data-type="irrigation" class="modal-type-btn flex-1 py-2.5 rounded-xl font-semibold text-sm ring-1">💧 Irrigation</button>
+          <button data-type="rain" class="modal-type-btn flex-1 py-2.5 rounded-xl font-semibold text-sm ring-1">🌧️ Rain (manual)</button>
+        </div>
+        <label class="flex flex-col gap-1.5">
+          <span class="text-sm font-semibold text-slate-700">Amount (inches)</span>
+          <input id="in-amount" type="number" step="0.01" min="0" placeholder="0.25" class="bg-slate-50 rounded-xl px-3 py-2.5 text-slate-800 outline-none ring-1 ring-slate-200 focus:ring-2 focus:ring-emerald-400" />
+        </label>
+        <label class="flex flex-col gap-1.5">
+          <span class="text-xs font-semibold text-slate-500">or minutes @ <input id="in-rate" type="number" step="0.05" value="0.5" class="w-14 bg-transparent border-b border-slate-300 text-slate-600 text-center outline-none" />"/hr sprinkler rate</span>
+          <input id="in-minutes" type="number" min="0" placeholder="e.g. 20" class="bg-slate-50 rounded-xl px-3 py-2.5 text-slate-800 outline-none ring-1 ring-slate-200 focus:ring-2 focus:ring-emerald-400" />
+        </label>
+        <label class="flex flex-col gap-1.5">
+          <span class="text-sm font-semibold text-slate-700">Notes (optional)</span>
+          <input id="in-notes" type="text" placeholder="Front yard, zone 2..." class="bg-slate-50 rounded-xl px-3 py-2.5 text-slate-800 outline-none ring-1 ring-slate-200 focus:ring-2 focus:ring-emerald-400" />
+        </label>
+        <div class="flex gap-3 mt-1">
+          <button id="btn-modal-cancel" class="flex-1 py-3 rounded-2xl font-semibold text-slate-600 bg-slate-100">Cancel</button>
+          <button id="btn-modal-save" class="flex-1 py-3 rounded-2xl font-bold text-white bg-emerald-500 shadow-lg shadow-emerald-500/25">Save</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</template>
+
+<script type="module">
+import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
+
+// =====================================================================
+// 1. CONFIG — paste your Supabase project URL + anon key here.
+//    Supabase Dashboard > Project Settings > API.
+// =====================================================================
+const SUPABASE_URL = 'https://mhmaoibfdpvautmxteet.supabase.co';
+const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im1obWFvaWJmZHB2YXV0bXh0ZWV0Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODUyMzk2ODksImV4cCI6MjEwMDgxNTY4OX0.V36AwZhiOp4i_UN7TgMOrxvQ-HpMzSsFABJ_PUip85Y';
+
+const NOT_CONFIGURED = SUPABASE_URL === 'YOUR_SUPABASE_URL' || SUPABASE_ANON_KEY === 'YOUR_SUPABASE_ANON_KEY';
+const supabase = NOT_CONFIGURED ? null : createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+const GRASS_PRESETS = {
+  kentucky_bluegrass: { phase1_end_day: 21, phase2_end_day: 42, weekly_target_inches: 1.25, root_dev_weekly_inches: 1.0 },
+  cool_season_other:  { phase1_end_day: 14, phase2_end_day: 28, weekly_target_inches: 1.25, root_dev_weekly_inches: 1.0 },
+  warm_season:         { phase1_end_day: 14, phase2_end_day: 28, weekly_target_inches: 1.0,  root_dev_weekly_inches: 0.85 },
+  custom:              { phase1_end_day: 21, phase2_end_day: 42, weekly_target_inches: 1.25, root_dev_weekly_inches: 1.0 },
+};
+
+const SATURATION_48H_THRESHOLD = 0.50;
+const RAIN_FORECAST_THRESHOLD = 0.25;
+const MOISTURE_LOOKBACK_HOURS = 8;
+const MOISTURE_LOOKBACK_THRESHOLD = 0.05;
+
+const STATUS_META = {
+  skip_rain:        { emoji: '🔵', label: 'SKIP - RAIN FORECASTED', color: 'blue' },
+  skip_saturated:   { emoji: '🔵', label: 'SKIP WATERING',           color: 'blue' },
+  water_now_mist:   { emoji: '🟡', label: 'Water Now (Light Mist)',  color: 'yellow' },
+  skip_moist:       { emoji: '🟢', label: 'Soil Moist — Skip',       color: 'green' },
+  water_now_deep:   { emoji: '🟡', label: 'Water Now (Deep Session)',color: 'yellow' },
+  on_track_today:   { emoji: '🟢', label: 'On Track Today',          color: 'green' },
+  water_now_weekly: { emoji: '🟢', label: 'Safe to Water',           color: 'green' },
+  on_track_week:    { emoji: '🟢', label: 'Target Met This Week',    color: 'green' },
+};
+const NOTIFIABLE_KEYS = new Set(['water_now_mist', 'water_now_deep', 'water_now_weekly', 'skip_rain', 'skip_saturated']);
+const PILL_CLASSES = {
+  green:  'bg-emerald-50 ring-emerald-200 text-emerald-800',
+  yellow: 'bg-amber-50 ring-amber-200 text-amber-800',
+  blue:   'bg-sky-50 ring-sky-200 text-sky-800',
+};
+
+const root = document.getElementById('root');
+let state = { settings: null, weather: null, logs: [], alerts: [] };
+
+// ---------------------------------------------------------------------
+// Data loading
+// ---------------------------------------------------------------------
+async function loadSettings() {
+  const { data, error } = await supabase.from('lawn_settings').select('*').eq('id', 1).maybeSingle();
+  if (error) console.error(error);
+  return data;
+}
+
+async function fetchWeather(lat, lon) {
+  const url = `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&hourly=precipitation&daily=precipitation_sum&past_days=7&forecast_days=1&timezone=auto`;
+  const res = await fetch(url);
+  if (!res.ok) throw new Error('Weather fetch failed');
+  return res.json();
+}
+
+async function loadLogs() {
+  const since = new Date(Date.now() - 8 * 24 * 3600 * 1000).toISOString();
+  const { data, error } = await supabase
+    .from('water_logs')
+    .select('*')
+    .gte('created_at', since)
+    .order('created_at', { ascending: false });
+  if (error) { console.error(error); return []; }
+  return data;
+}
+
+async function loadRecentAlerts() {
+  const { data, error } = await supabase
+    .from('alert_history')
+    .select('*')
+    .order('sent_at', { ascending: false })
+    .limit(3);
+  if (error) return [];
+  return data || [];
+}
+
+// ---------------------------------------------------------------------
+// Phase engine
+// ---------------------------------------------------------------------
+function getPhase(settings) {
+  const seedDate = new Date(settings.seed_date + 'T00:00:00');
+  const daysSince = Math.floor((Date.now() - seedDate.getTime()) / (24 * 3600 * 1000));
+  let phase = 3;
+  if (daysSince < settings.phase1_end_day) phase = 1;
+  else if (daysSince < settings.phase2_end_day) phase = 2;
+  return { daysSince: Math.max(daysSince, 0), phase };
+}
+
+function sumHourly(weather, hours) {
+  const times = weather.hourly.time;
+  const precip = weather.hourly.precipitation;
+  const now = Date.now();
+  let nowIdx = times.length - 1;
+  for (let i = 0; i < times.length; i++) {
+    if (new Date(times[i]).getTime() > now) { nowIdx = i - 1; break; }
+  }
+  let sum = 0;
+  for (let i = Math.max(0, nowIdx - hours + 1); i <= nowIdx; i++) sum += precip[i] || 0;
+  return sum;
+}
+
+function sumDailyTrailing(weather, days) {
+  const vals = weather.daily.precipitation_sum;
+  const slice = vals.slice(Math.max(0, vals.length - days));
+  return slice.reduce((a, b) => a + (b || 0), 0);
+}
+
+function sumLogs(logs, hours, types = ['rain', 'irrigation']) {
+  const cutoff = Date.now() - hours * 3600 * 1000;
+  return logs
+    .filter(l => types.includes(l.type) && new Date(l.created_at).getTime() >= cutoff)
+    .reduce((a, l) => a + l.amount_inches, 0);
+}
+
+function computeMetrics(settings, weather, logs) {
+  const rain8h = sumHourly(weather, MOISTURE_LOOKBACK_HOURS);
+  const rain24h = sumHourly(weather, 24);
+  const rain48h = sumHourly(weather, 48);
+  const rainWeek = sumDailyTrailing(weather, 7);
+  const forecastToday = weather.daily.precipitation_sum[weather.daily.precipitation_sum.length - 1] || 0;
+
+  const logs8h = sumLogs(logs, 8);
+  const logs24h = sumLogs(logs, 24);
+  const logs48h = sumLogs(logs, 48);
+  const logsWeek = sumLogs(logs, 24 * 7);
+
+  return {
+    forecastToday,
+    combined8h: rain8h + logs8h,
+    combined24h: rain24h + logs24h,
+    combined48h: rain48h + logs48h,
+    combinedWeek: rainWeek + logsWeek,
+    rain24h,
+  };
+}
+
+function computeStatus(settings, phaseInfo, metrics) {
+  const { phase } = phaseInfo;
+
+  if (metrics.forecastToday > RAIN_FORECAST_THRESHOLD) {
+    return { key: 'skip_rain', detail: `${metrics.forecastToday.toFixed(2)}" of rain forecasted today.` };
+  }
+
+  if (phase === 1) {
+    if (metrics.combined8h >= MOISTURE_LOOKBACK_THRESHOLD) {
+      return { key: 'skip_moist', detail: `${metrics.combined8h.toFixed(2)}" of moisture in the last ${MOISTURE_LOOKBACK_HOURS}h.` };
+    }
+    return { key: 'water_now_mist', detail: 'Keep the top ½" of soil moist — short 5–10 min mist.' };
+  }
+
+  if (metrics.combined48h > SATURATION_48H_THRESHOLD) {
+    const skipHours = metrics.combined48h > 1.0 ? 48 : 24;
+    return { key: 'skip_saturated', detail: `${metrics.combined48h.toFixed(2)}" received in the last 48h. Re-check in ${skipHours}h.` };
+  }
+
+  if (phase === 2) {
+    const dailyTarget = settings.root_dev_weekly_inches / 7;
+    if (metrics.combined24h >= dailyTarget) {
+      return { key: 'on_track_today', detail: `${metrics.combined24h.toFixed(2)}" today (target ${dailyTarget.toFixed(2)}").` };
+    }
+    return { key: 'water_now_deep', detail: `${metrics.combined24h.toFixed(2)}" today so far — target ${dailyTarget.toFixed(2)}", one deeper session.` };
+  }
+
+  // phase 3 — establishment
+  if (metrics.combinedWeek >= settings.weekly_target_inches) {
+    return { key: 'on_track_week', detail: `${metrics.combinedWeek.toFixed(2)}" of ${settings.weekly_target_inches}" this week.` };
+  }
+  const deficit = settings.weekly_target_inches - metrics.combinedWeek;
+  return { key: 'water_now_weekly', detail: `${deficit.toFixed(2)}" still needed this week (${metrics.combinedWeek.toFixed(2)}" / ${settings.weekly_target_inches}").` };
+}
+
+function buildNotifications(settings, phaseInfo, metrics, status, recentAlerts) {
+  const items = [];
+  const meta = STATUS_META[status.key];
+  items.push(`${meta.emoji} ${meta.label} — ${status.detail}`);
+
+  if (metrics.forecastToday > RAIN_FORECAST_THRESHOLD && status.key !== 'skip_rain') {
+    items.push(`🌧️ Heads up: ${metrics.forecastToday.toFixed(2)}" of rain still forecasted later today.`);
+  }
+  if (metrics.combined48h > SATURATION_48H_THRESHOLD && status.key !== 'skip_saturated') {
+    items.push(`⚠️ ${metrics.combined48h.toFixed(2)}" detected in the last 48h.`);
+  }
+
+  const nextCutoff = phaseInfo.phase === 1 ? settings.phase1_end_day : phaseInfo.phase === 2 ? settings.phase2_end_day : null;
+  if (nextCutoff !== null) {
+    const daysLeft = nextCutoff - phaseInfo.daysSince;
+    if (daysLeft >= 0 && daysLeft <= 3) {
+      const nextPhaseName = phaseInfo.phase === 1 ? 'Root Development' : 'Establishment';
+      items.push(`📅 Entering ${nextPhaseName} phase in ${daysLeft} day${daysLeft === 1 ? '' : 's'}.`);
+    }
+  }
+
+  for (const a of recentAlerts) {
+    items.push(`📧 Emailed alert: ${a.status_text} (${relativeTime(a.sent_at)})`);
+  }
+  return items;
+}
+
+// ---------------------------------------------------------------------
+// Rendering
+// ---------------------------------------------------------------------
+function relativeTime(iso) {
+  const diffMs = Date.now() - new Date(iso).getTime();
+  const mins = Math.round(diffMs / 60000);
+  if (mins < 60) return `${mins}m ago`;
+  const hrs = Math.round(mins / 60);
+  if (hrs < 24) return `${hrs}h ago`;
+  return `${Math.round(hrs / 24)}d ago`;
+}
+
+function phaseName(phase) {
+  return phase === 1 ? 'Germination' : phase === 2 ? 'Root Development' : 'Establishment';
+}
+
+function renderSetup(prefill) {
+  root.innerHTML = '';
+  root.appendChild(document.getElementById('tpl-setup').content.cloneNode(true));
+
+  const grassSel = document.getElementById('in-grass-type');
+  const p1 = document.getElementById('in-phase1-end');
+  const p2 = document.getElementById('in-phase2-end');
+  const rootTarget = document.getElementById('in-root-target');
+  const weeklyTarget = document.getElementById('in-weekly-target');
+
+  function applyPreset(key) {
+    const p = GRASS_PRESETS[key];
+    p1.value = p.phase1_end_day;
+    p2.value = p.phase2_end_day;
+    rootTarget.value = p.root_dev_weekly_inches;
+    weeklyTarget.value = p.weekly_target_inches;
+  }
+
+  const s = prefill || {};
+  grassSel.value = s.grass_type || 'kentucky_bluegrass';
+  applyPreset(grassSel.value);
+  if (s.seed_date) document.getElementById('in-seed-date').value = s.seed_date;
+  if (s.phase1_end_day) p1.value = s.phase1_end_day;
+  if (s.phase2_end_day) p2.value = s.phase2_end_day;
+  if (s.root_dev_weekly_inches) rootTarget.value = s.root_dev_weekly_inches;
+  if (s.weekly_target_inches) weeklyTarget.value = s.weekly_target_inches;
+  if (s.latitude) document.getElementById('in-lat').value = s.latitude;
+  if (s.longitude) document.getElementById('in-lon').value = s.longitude;
+  if (s.alert_email) document.getElementById('in-email').value = s.alert_email;
+
+  grassSel.addEventListener('change', () => applyPreset(grassSel.value));
+
+  document.getElementById('btn-use-location').addEventListener('click', () => {
+    if (!navigator.geolocation) return alert('Geolocation not supported on this browser.');
+    navigator.geolocation.getCurrentPosition(
+      pos => {
+        document.getElementById('in-lat').value = pos.coords.latitude.toFixed(5);
+        document.getElementById('in-lon').value = pos.coords.longitude.toFixed(5);
+      },
+      err => alert('Could not get location: ' + err.message)
+    );
+  });
+
+  document.getElementById('btn-save-setup').addEventListener('click', async () => {
+    const errEl = document.getElementById('setup-error');
+    errEl.classList.add('hidden');
+    const seedDate = document.getElementById('in-seed-date').value;
+    const lat = parseFloat(document.getElementById('in-lat').value);
+    const lon = parseFloat(document.getElementById('in-lon').value);
+    if (!seedDate || isNaN(lat) || isNaN(lon)) {
+      errEl.textContent = 'Seed date and location (lat/lon) are required.';
+      errEl.classList.remove('hidden');
+      return;
+    }
+    const payload = {
+      id: 1,
+      seed_date: seedDate,
+      grass_type: grassSel.value,
+      phase1_end_day: parseInt(p1.value, 10),
+      phase2_end_day: parseInt(p2.value, 10),
+      weekly_target_inches: parseFloat(weeklyTarget.value),
+      root_dev_weekly_inches: parseFloat(rootTarget.value),
+      latitude: lat,
+      longitude: lon,
+      alert_email: document.getElementById('in-email').value || null,
+      updated_at: new Date().toISOString(),
+    };
+    const { error } = await supabase.from('lawn_settings').upsert(payload);
+    if (error) {
+      errEl.textContent = 'Save failed: ' + error.message;
+      errEl.classList.remove('hidden');
+      return;
+    }
+    state.settings = payload;
+    await refreshAll();
+  });
+}
+
+function renderApp() {
+  root.innerHTML = '';
+  root.appendChild(document.getElementById('tpl-app').content.cloneNode(true));
+  document.getElementById('btn-settings').addEventListener('click', () => renderSetup(state.settings));
+  document.getElementById('btn-fab').addEventListener('click', openModal);
+  document.getElementById('btn-enable-notif').addEventListener('click', async () => {
+    if (!('Notification' in window)) return alert('Notifications not supported on this browser.');
+    await Notification.requestPermission();
+  });
+}
+
+function renderDashboard(settings, phaseInfo, metrics, status) {
+  document.getElementById('phase-label').textContent = `Day ${phaseInfo.daysSince} · ${phaseName(phaseInfo.phase)} Phase`;
+
+  const meta = STATUS_META[status.key];
+  const pill = document.getElementById('status-pill');
+  pill.className = `rounded-3xl px-4 py-4 flex items-center gap-3 ring-1 shadow-sm ${PILL_CLASSES[meta.color]}`;
+  document.getElementById('status-emoji').textContent = meta.emoji;
+  document.getElementById('status-label').textContent = meta.label;
+  document.getElementById('status-detail').textContent = status.detail;
+
+  const cards = document.getElementById('dashboard-cards');
+  cards.innerHTML = '';
+
+  function card(title, valueHtml, sub) {
+    const div = document.createElement('div');
+    div.className = 'card rounded-3xl p-4';
+    div.innerHTML = `<div class="text-xs uppercase tracking-wide text-slate-400 font-semibold">${title}</div>
+      <div class="text-2xl font-bold mt-1 text-slate-900">${valueHtml}</div>
+      ${sub ? `<div class="text-xs text-slate-400 mt-1">${sub}</div>` : ''}`;
+    return div;
+  }
+
+  if (phaseInfo.phase === 1) {
+    cards.appendChild(card('Moisture (8h)', `${metrics.combined8h.toFixed(2)}"`, `Threshold ${MOISTURE_LOOKBACK_THRESHOLD}"`));
+  } else if (phaseInfo.phase === 2) {
+    const dailyTarget = settings.root_dev_weekly_inches / 7;
+    cards.appendChild(card('Today\'s Water', `${metrics.combined24h.toFixed(2)}" <span class="text-sm text-slate-400 font-normal">/ ${dailyTarget.toFixed(2)}"</span>`));
+  } else {
+    const pct = Math.min(100, Math.round((metrics.combinedWeek / settings.weekly_target_inches) * 100));
+    cards.appendChild(card('This Week', `${metrics.combinedWeek.toFixed(2)}" <span class="text-sm text-slate-400 font-normal">/ ${settings.weekly_target_inches}"</span>`,
+      `<div class="w-full bg-slate-100 rounded-full h-1.5 mt-2"><div class="bg-emerald-500 h-1.5 rounded-full" style="width:${pct}%"></div></div>`));
+  }
+  cards.appendChild(card('Rain Past 24h', `${metrics.rain24h.toFixed(2)}"`));
+  cards.appendChild(card('Forecast Today', `${metrics.forecastToday.toFixed(2)}"`));
+}
+
+function renderNotifications(items) {
+  const ul = document.getElementById('notif-list');
+  ul.innerHTML = '';
+  if (!items.length) {
+    ul.innerHTML = '<li class="text-slate-400 text-sm">No alerts right now.</li>';
+    return;
+  }
+  for (const text of items) {
+    const li = document.createElement('li');
+    li.className = 'bg-slate-50 rounded-xl px-3 py-2 ring-1 ring-slate-100';
+    li.textContent = text;
+    ul.appendChild(li);
+  }
+}
+
+function renderHistory(logs) {
+  const ul = document.getElementById('history-list');
+  ul.innerHTML = '';
+  const last5 = logs.slice(0, 5);
+  if (!last5.length) {
+    ul.innerHTML = '<li class="text-slate-400 text-sm py-2">No entries yet.</li>';
+    return;
+  }
+  for (const l of last5) {
+    const li = document.createElement('li');
+    li.className = 'py-2.5 flex items-center justify-between';
+    li.innerHTML = `<div class="flex items-center gap-2">
+        <span>${l.type === 'rain' ? '🌧️' : '💧'}</span>
+        <div>
+          <div class="text-sm font-medium text-slate-800">${l.amount_inches.toFixed(2)}" ${l.type}</div>
+          ${l.notes ? `<div class="text-xs text-slate-400">${escapeHtml(l.notes)}</div>` : ''}
+        </div>
+      </div>
+      <span class="text-xs text-slate-400">${relativeTime(l.created_at)}</span>`;
+    ul.appendChild(li);
+  }
+}
+
+function escapeHtml(s) {
+  const d = document.createElement('div');
+  d.textContent = s;
+  return d.innerHTML;
+}
+
+// ---------------------------------------------------------------------
+// Modal
+// ---------------------------------------------------------------------
+let modalType = 'irrigation';
+
+function openModal() {
+  document.body.appendChild(document.getElementById('tpl-modal').content.cloneNode(true));
+  modalType = 'irrigation';
+  updateModalTypeButtons();
+
+  document.querySelectorAll('.modal-type-btn').forEach(btn => {
+    btn.addEventListener('click', () => { modalType = btn.dataset.type; updateModalTypeButtons(); });
+  });
+
+  const amountEl = document.getElementById('in-amount');
+  const minutesEl = document.getElementById('in-minutes');
+  const rateEl = document.getElementById('in-rate');
+  minutesEl.addEventListener('input', () => {
+    const mins = parseFloat(minutesEl.value);
+    const rate = parseFloat(rateEl.value) || 0.5;
+    if (!isNaN(mins)) amountEl.value = ((mins / 60) * rate).toFixed(2);
+  });
+
+  document.getElementById('btn-modal-cancel').addEventListener('click', closeModal);
+  document.getElementById('modal-backdrop').addEventListener('click', e => { if (e.target.id === 'modal-backdrop') closeModal(); });
+  document.getElementById('btn-modal-save').addEventListener('click', saveModal);
+}
+
+function updateModalTypeButtons() {
+  document.querySelectorAll('.modal-type-btn').forEach(btn => {
+    const active = btn.dataset.type === modalType;
+    btn.className = `modal-type-btn flex-1 py-2.5 rounded-xl font-semibold text-sm ring-1 ${active ? 'bg-emerald-500 text-white ring-emerald-400 shadow-md shadow-emerald-500/25' : 'bg-slate-50 text-slate-600 ring-slate-200'}`;
+  });
+}
+
+function closeModal() {
+  const el = document.getElementById('modal-backdrop');
+  if (el) el.remove();
+}
+
+async function saveModal() {
+  const amount = parseFloat(document.getElementById('in-amount').value);
+  if (isNaN(amount) || amount <= 0) return alert('Enter a valid amount in inches.');
+  const notes = document.getElementById('in-notes').value || null;
+  const { error } = await supabase.from('water_logs').insert({ type: modalType, amount_inches: amount, notes });
+  if (error) return alert('Save failed: ' + error.message);
+  closeModal();
+  await refreshAll();
+}
+
+// ---------------------------------------------------------------------
+// Orchestration
+// ---------------------------------------------------------------------
+function renderConfigError(message) {
+  root.innerHTML = `<div class="flex-1 flex flex-col items-center justify-center text-center gap-3 px-4">
+    <div class="text-4xl">⚠️</div>
+    <h1 class="text-lg font-bold text-slate-900">Setup Needed</h1>
+    <p class="text-slate-500 text-sm">${message}</p>
+  </div>`;
+}
+
+async function refreshAll() {
+  if (NOT_CONFIGURED) {
+    renderConfigError('Paste your Supabase URL and anon key into the SUPABASE_URL / SUPABASE_ANON_KEY constants near the top of the &lt;script&gt; in index.html, then reload.');
+    return;
+  }
+
+  let settings;
+  try {
+    settings = state.settings || await loadSettings();
+  } catch (e) {
+    console.error(e);
+    renderConfigError('Could not reach Supabase. Double-check your SUPABASE_URL / SUPABASE_ANON_KEY and that schema.sql has been run, then reload.');
+    return;
+  }
+  if (!settings) { renderSetup(null); return; }
+  state.settings = settings;
+
+  renderApp();
+
+  try {
+    const [weather, logs, alerts] = await Promise.all([
+      fetchWeather(settings.latitude, settings.longitude),
+      loadLogs(),
+      loadRecentAlerts(),
+    ]);
+    state.weather = weather;
+    state.logs = logs;
+    state.alerts = alerts;
+
+    const phaseInfo = getPhase(settings);
+    const metrics = computeMetrics(settings, weather, logs);
+    const status = computeStatus(settings, phaseInfo, metrics);
+
+    renderDashboard(settings, phaseInfo, metrics, status);
+    renderNotifications(buildNotifications(settings, phaseInfo, metrics, status, alerts));
+    renderHistory(logs);
+    maybeNotify(status);
+  } catch (e) {
+    console.error(e);
+    const cards = document.getElementById('dashboard-cards');
+    if (cards) cards.innerHTML = '<div class="card rounded-3xl p-4 text-sm text-red-600">Weather data unavailable — check your connection.</div>';
+  }
+}
+
+function maybeNotify(status) {
+  if (!NOTIFIABLE_KEYS.has(status.key)) return;
+  if (!('Notification' in window) || Notification.permission !== 'granted') return;
+  const today = new Date().toDateString();
+  const lastKey = localStorage.getItem('lastNotifiedStatusKey');
+  const lastDate = localStorage.getItem('lastNotifiedDate');
+  if (lastKey === status.key && lastDate === today) return;
+  const meta = STATUS_META[status.key];
+  new Notification(`${meta.emoji} ${meta.label}`, { body: status.detail });
+  localStorage.setItem('lastNotifiedStatusKey', status.key);
+  localStorage.setItem('lastNotifiedDate', today);
+}
+
+refreshAll();
+setInterval(refreshAll, 15 * 60 * 1000);
+</script>
+</body>
+</html>
