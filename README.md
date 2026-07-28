@@ -31,10 +31,12 @@ To test without waiting for the cron, from the Dashboard's function page use "In
 
 ## 2. Using the app
 
-- **Dashboard** shows your current phase ("Day N · Germination/Root Development/Establishment"), a status pill with both the current recommendation *and* a "Next watering: {when}, ~{amount}"" line, and metrics that adapt to the phase (moisture in the last 8h during germination, today's progress during root development, weekly cumulative progress once established).
+- **Dashboard** shows your current phase ("Day N · Germination/Root Development/Establishment"), a status pill with both the current recommendation *and* a concrete "Next watering: Today at 3:25 PM (in 41m) — 0.05" (≈6 min)" line — an actual clock time, a countdown, and the amount in both inches and sprinkler minutes.
+- **Soil Moisture gauge** — an animated thermometer that empties from "Moist" (green) through "Getting Dry" (amber) to "Water Needed"/"Critically Dry" (red, pulsing) as the current watering interval elapses. It ticks on its own every minute between refreshes, so it visibly counts down in real time.
 - **Frequency, not just amount:** watering cadence is phase-driven — Germination waters `germination_sessions_per_day` times/day (default 3, light sessions), Root Development tapers daily → every-other-day as it approaches Establishment, and Establishment waters every `establishment_interval_days` (default 3.5, ~2×/week), deep sessions. Both settings are editable in Setup and per-grass-type presets.
 - **Rain-skip is gated on both amount and confidence:** the app already used the forecasted *amount* of rain (not just the % chance) to decide whether to skip — now it also requires the probability to clear 40% before skipping, so a low-confidence forecast won't cancel a needed watering.
-- **+ button** logs a manual irrigation or rain entry — enter inches directly, or minutes at your sprinkler's inches/hour rate.
+- **Sprinkler rate (in/hr)** in Setup converts every recommended amount into minutes to run your actual sprinkler/hose — set it once (0.5"/hr default) and every "how much" in the app speaks in minutes, not just inches.
+- **+ button** logs a manual irrigation or rain entry — enter inches directly, or minutes at your sprinkler's inches/hour rate (pre-filled from your Setup rate).
 - **Notification Center** always shows the current recommendation plus the last few emails the background job sent, so nothing is hidden even if you skip email.
 - **Enable Alerts** requests browser notification permission for foreground/backgrounded alerts while the app is open.
 - **⚙️ gear icon** re-opens Setup to edit seed date, grass type, phase-length thresholds, weekly/session targets, watering frequency, location, or alert email at any time.

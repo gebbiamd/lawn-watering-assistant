@@ -18,6 +18,8 @@
   .card { background: #ffffff; border: 1px solid rgba(15,23,42,.06); box-shadow: 0 1px 2px rgba(15,23,42,.04), 0 12px 28px -16px rgba(15,23,42,.12); }
   .modal-enter { animation: slideUp .2s ease-out; }
   @keyframes slideUp { from { transform: translateY(24px); opacity: 0 } to { transform: translateY(0); opacity: 1 } }
+  @keyframes pulseGlow { 0%, 100% { box-shadow: 0 0 0 0 rgba(239,68,68,.55); } 50% { box-shadow: 0 0 0 9px rgba(239,68,68,0); } }
+  .pulse-critical { animation: pulseGlow 1.6s ease-in-out infinite; }
 </style>
 </head>
 <body class="min-h-screen text-slate-800 antialiased bg-gradient-to-b from-emerald-50 via-white to-sky-50">
@@ -83,6 +85,14 @@
       <p class="text-xs text-slate-400 -mt-2">Established target: 1.0" in cool spring/fall, 1.25" default, up to 1.5" in summer heat. Germination sessions/day: 2–4 light waterings to keep the seed bed moist. Established interval: days between deep waterings (~3.5 = twice/week). Edit anytime.</p>
     </div>
 
+    <div class="card rounded-3xl p-4 flex flex-col gap-3">
+      <label class="flex flex-col gap-1.5">
+        <span class="text-sm font-semibold text-slate-700">Sprinkler rate (in/hr)</span>
+        <input id="in-sprinkler-rate" type="number" step="0.05" min="0.05" class="bg-slate-50 rounded-xl px-3 py-2.5 text-slate-800 outline-none ring-1 ring-slate-200 focus:ring-2 focus:ring-emerald-400" />
+      </label>
+      <p class="text-xs text-slate-400">Used to convert recommended inches into minutes to run your sprinkler/hose. 0.5"/hr is typical for an oscillating sprinkler — check yours with a rain gauge for accuracy.</p>
+    </div>
+
     <div class="card rounded-3xl p-4 flex flex-col gap-4">
       <div class="flex items-center justify-between">
         <span class="text-sm font-semibold text-slate-700">Location</span>
@@ -130,6 +140,20 @@
         <div id="status-label" class="font-bold text-base leading-tight"></div>
         <div id="status-detail" class="text-sm opacity-75 mt-0.5"></div>
         <div id="status-next" class="text-xs font-semibold mt-1.5 opacity-90"></div>
+      </div>
+    </div>
+
+    <div class="card rounded-3xl p-4 flex items-center gap-4">
+      <div class="flex flex-col items-center shrink-0">
+        <div class="relative w-7 h-32 bg-slate-100 rounded-full overflow-hidden ring-1 ring-slate-200">
+          <div id="moisture-gauge-fill" class="absolute bottom-0 left-0 right-0 rounded-full bg-emerald-400 transition-all duration-700 ease-out" style="height:0%"></div>
+        </div>
+        <div id="moisture-gauge-bulb" class="w-5 h-5 rounded-full -mt-2.5 ring-4 ring-white bg-emerald-500 shrink-0"></div>
+      </div>
+      <div class="min-w-0">
+        <div class="text-xs uppercase tracking-wide text-slate-400 font-semibold">Soil Moisture</div>
+        <div id="moisture-gauge-label" class="text-lg font-bold mt-0.5 text-emerald-700">—</div>
+        <div id="moisture-gauge-sub" class="text-xs text-slate-500 mt-0.5"></div>
       </div>
     </div>
 
@@ -283,7 +307,7 @@ const WEATHER_ICONS = {
 function weatherIcon(code) { return WEATHER_ICONS[code] || '🌡️'; }
 
 const root = document.getElementById('root');
-let state = { settings: null, weather: null, logs: [], alerts: [] };
+let state = { settings: null, weather: null, logs: [], alerts: [], schedule: null };
 let moistureChart = null;
 
 // ---------------------------------------------------------------------
@@ -486,22 +510,50 @@ function computeSchedule(settings, phaseInfo, weather, logs) {
   return { intervalHours, sessionAmountInches, lastWetAt, nextDueAt };
 }
 
+function formatDuration(hours) {
+  if (hours < 1) return `${Math.max(1, Math.round(hours * 60))}m`;
+  const h = Math.floor(hours);
+  const m = Math.round((hours - h) * 60);
+  return `${h}h${m ? ' ' + m + 'm' : ''}`;
+}
+
+// Answers "WHEN" concretely: a clock time, plus a relative countdown for
+// anything happening soon, and an explicit overdue duration once it's passed.
 function formatNextDue(date) {
   const now = new Date();
-  if (date <= now) return 'Today';
+  const diffMs = date.getTime() - now.getTime();
+
+  if (diffMs <= 0) {
+    return `overdue by ${formatDuration(Math.abs(diffMs) / 3600000)}`;
+  }
+
+  const timeStr = date.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
   const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate());
   const startOfTarget = new Date(date.getFullYear(), date.getMonth(), date.getDate());
   const diffDays = Math.round((startOfTarget - startOfToday) / 86400000);
-  if (diffDays === 0) return 'Today';
-  if (diffDays === 1) return 'Tomorrow';
-  if (diffDays <= 6) return date.toLocaleDateString(undefined, { weekday: 'long' });
-  return date.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+
+  let dayLabel;
+  if (diffDays === 0) dayLabel = 'Today';
+  else if (diffDays === 1) dayLabel = 'Tomorrow';
+  else if (diffDays <= 6) dayLabel = date.toLocaleDateString(undefined, { weekday: 'long' });
+  else dayLabel = date.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+
+  if (diffMs < 36 * 3600 * 1000) {
+    return `${dayLabel} at ${timeStr} (in ${formatDuration(diffMs / 3600000)})`;
+  }
+  return `${dayLabel} at ${timeStr}`;
+}
+
+function formatAmount(inches, ratePerHour) {
+  const rate = ratePerHour || 0.5;
+  const mins = Math.max(1, Math.round((inches / rate) * 60));
+  return `${inches.toFixed(2)}" (≈${mins} min)`;
 }
 
 function buildNotifications(settings, phaseInfo, metrics, status, recentAlerts, weather, todayIdx, schedule) {
   const items = [];
   const meta = STATUS_META[status.key];
-  items.push(`${meta.emoji} ${meta.label} — ${status.detail} Next: ${formatNextDue(schedule.nextDueAt)}, ~${schedule.sessionAmountInches.toFixed(2)}".`);
+  items.push(`${meta.emoji} ${meta.label} — ${status.detail} Next: ${formatNextDue(schedule.nextDueAt)} — ${formatAmount(schedule.sessionAmountInches, settings.sprinkler_rate_inches_per_hour)}.`);
 
   if (metrics.forecastToday > RAIN_FORECAST_THRESHOLD && status.key !== 'skip_rain') {
     items.push(`🌧️ Heads up: ${metrics.forecastToday.toFixed(2)}" of rain still forecasted later today.`);
@@ -562,6 +614,8 @@ function renderSetup(prefill) {
   const weeklyTarget = document.getElementById('in-weekly-target');
   const germSessions = document.getElementById('in-germ-sessions');
   const establishInterval = document.getElementById('in-establish-interval');
+  const sprinklerRate = document.getElementById('in-sprinkler-rate');
+  sprinklerRate.value = 0.5;
 
   function applyPreset(key) {
     const p = GRASS_PRESETS[key];
@@ -583,6 +637,7 @@ function renderSetup(prefill) {
   if (s.weekly_target_inches) weeklyTarget.value = s.weekly_target_inches;
   if (s.germination_sessions_per_day) germSessions.value = s.germination_sessions_per_day;
   if (s.establishment_interval_days) establishInterval.value = s.establishment_interval_days;
+  if (s.sprinkler_rate_inches_per_hour) sprinklerRate.value = s.sprinkler_rate_inches_per_hour;
   if (s.latitude) document.getElementById('in-lat').value = s.latitude;
   if (s.longitude) document.getElementById('in-lon').value = s.longitude;
   if (s.alert_email) document.getElementById('in-email').value = s.alert_email;
@@ -621,6 +676,7 @@ function renderSetup(prefill) {
       root_dev_weekly_inches: parseFloat(rootTarget.value),
       germination_sessions_per_day: parseInt(germSessions.value, 10),
       establishment_interval_days: parseFloat(establishInterval.value),
+      sprinkler_rate_inches_per_hour: parseFloat(sprinklerRate.value) || 0.5,
       latitude: lat,
       longitude: lon,
       alert_email: document.getElementById('in-email').value || null,
@@ -657,7 +713,7 @@ function renderDashboard(settings, phaseInfo, metrics, status, schedule) {
   document.getElementById('status-emoji').textContent = meta.emoji;
   document.getElementById('status-label').textContent = meta.label;
   document.getElementById('status-detail').textContent = status.detail;
-  document.getElementById('status-next').textContent = `📅 Next watering: ${formatNextDue(schedule.nextDueAt)}, ~${schedule.sessionAmountInches.toFixed(2)}"`;
+  document.getElementById('status-next').textContent = `📅 Next watering: ${formatNextDue(schedule.nextDueAt)} — ${formatAmount(schedule.sessionAmountInches, settings.sprinkler_rate_inches_per_hour)}`;
 
   const cards = document.getElementById('dashboard-cards');
   cards.innerHTML = '';
@@ -683,6 +739,46 @@ function renderDashboard(settings, phaseInfo, metrics, status, schedule) {
   }
   cards.appendChild(card('Rain Past 24h', `${metrics.rain24h.toFixed(2)}"`));
   cards.appendChild(card('Forecast Today', `${metrics.forecastToday.toFixed(2)}"`));
+}
+
+function computeMoistureLevel(schedule) {
+  if (!schedule.lastWetAt) return { pct: 0, overdueHours: schedule.intervalHours };
+  const elapsedHours = (Date.now() - schedule.lastWetAt.getTime()) / 3600000;
+  const pct = Math.max(0, Math.min(100, 100 - (elapsedHours / schedule.intervalHours) * 100));
+  const overdueHours = Math.max(0, elapsedHours - schedule.intervalHours);
+  return { pct, overdueHours };
+}
+
+function renderMoistureGauge(schedule) {
+  const fill = document.getElementById('moisture-gauge-fill');
+  const bulb = document.getElementById('moisture-gauge-bulb');
+  const label = document.getElementById('moisture-gauge-label');
+  const sub = document.getElementById('moisture-gauge-sub');
+  if (!fill) return;
+
+  const { pct, overdueHours } = computeMoistureLevel(schedule);
+  const critical = overdueHours > schedule.intervalHours * 0.5;
+
+  let fillColor, bulbColor, labelColor, labelText;
+  if (overdueHours > 0) {
+    fillColor = 'bg-red-400'; bulbColor = 'bg-red-500'; labelColor = 'text-red-600';
+    labelText = critical ? 'Critically Dry' : 'Water Needed';
+    sub.textContent = `Overdue by ${formatDuration(overdueHours)}`;
+  } else if (pct >= 50) {
+    fillColor = 'bg-emerald-400'; bulbColor = 'bg-emerald-500'; labelColor = 'text-emerald-700';
+    labelText = 'Moist';
+    sub.textContent = `Next watering ${formatNextDue(schedule.nextDueAt)}`;
+  } else {
+    fillColor = 'bg-amber-400'; bulbColor = 'bg-amber-500'; labelColor = 'text-amber-700';
+    labelText = 'Getting Dry';
+    sub.textContent = `Next watering ${formatNextDue(schedule.nextDueAt)}`;
+  }
+
+  fill.className = `absolute bottom-0 left-0 right-0 rounded-full transition-all duration-700 ease-out ${fillColor}`;
+  fill.style.height = `${pct}%`;
+  bulb.className = `w-5 h-5 rounded-full -mt-2.5 ring-4 ring-white shrink-0 ${bulbColor} ${critical ? 'pulse-critical' : ''}`;
+  label.className = `text-lg font-bold mt-0.5 ${labelColor}`;
+  label.textContent = labelText;
 }
 
 function renderCurrentConditions(weather) {
@@ -883,6 +979,7 @@ function openModal(entry = null) {
 
   const minutesEl = document.getElementById('in-minutes');
   const rateEl = document.getElementById('in-rate');
+  rateEl.value = state.settings?.sprinkler_rate_inches_per_hour || 0.5;
   minutesEl.addEventListener('input', () => {
     const mins = parseFloat(minutesEl.value);
     const rate = parseFloat(rateEl.value) || 0.5;
@@ -982,8 +1079,10 @@ async function refreshAll() {
     const metrics = computeMetrics(settings, weather, logs, todayIdx);
     const status = computeStatus(settings, phaseInfo, metrics);
     const schedule = computeSchedule(settings, phaseInfo, weather, logs);
+    state.schedule = schedule;
 
     renderDashboard(settings, phaseInfo, metrics, status, schedule);
+    renderMoistureGauge(schedule);
     renderCurrentConditions(weather);
     renderForecastStrip(weather, todayIdx);
     renderMoistureChart(weather, logs, todayIdx);
@@ -1012,6 +1111,8 @@ function maybeNotify(status) {
 
 refreshAll();
 setInterval(refreshAll, 15 * 60 * 1000);
+// Ticks the gauge/next-due display between full refreshes using cached data — no network calls.
+setInterval(() => { if (state.schedule) renderMoistureGauge(state.schedule); }, 60 * 1000);
 </script>
 </body>
 </html>

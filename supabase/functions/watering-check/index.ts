@@ -162,16 +162,44 @@ function computeSchedule(settings: any, phaseInfo: any, weather: any, logs: any[
   return { intervalHours, sessionAmountInches, lastWetAt, nextDueAt };
 }
 
-function formatNextDue(date: Date) {
+function formatDuration(hours: number) {
+  if (hours < 1) return `${Math.max(1, Math.round(hours * 60))}m`;
+  const h = Math.floor(hours);
+  const m = Math.round((hours - h) * 60);
+  return `${h}h${m ? ' ' + m + 'm' : ''}`;
+}
+
+// tz is the lawn's own IANA timezone (from Open-Meteo's timezone=auto response) —
+// the Edge Runtime itself runs in UTC, so times must be rendered in tz explicitly
+// or the email would show the wrong local time.
+function formatNextDue(date: Date, tz: string) {
   const now = new Date();
-  if (date <= now) return 'today';
-  const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-  const startOfTarget = new Date(date.getFullYear(), date.getMonth(), date.getDate());
-  const diffDays = Math.round((startOfTarget.getTime() - startOfToday.getTime()) / 86400000);
-  if (diffDays === 0) return 'today';
-  if (diffDays === 1) return 'tomorrow';
-  if (diffDays <= 6) return date.toLocaleDateString('en-US', { weekday: 'long' });
-  return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+  const diffMs = date.getTime() - now.getTime();
+
+  if (diffMs <= 0) {
+    return `overdue by ${formatDuration(Math.abs(diffMs) / 3600000)}`;
+  }
+
+  const timeStr = date.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', timeZone: tz });
+  const dayFmt = (d: Date) => d.toLocaleDateString('en-US', { timeZone: tz });
+  const diffDays = Math.round((new Date(dayFmt(date)).getTime() - new Date(dayFmt(now)).getTime()) / 86400000);
+
+  let dayLabel: string;
+  if (diffDays === 0) dayLabel = 'Today';
+  else if (diffDays === 1) dayLabel = 'Tomorrow';
+  else if (diffDays <= 6) dayLabel = date.toLocaleDateString('en-US', { weekday: 'long', timeZone: tz });
+  else dayLabel = date.toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: tz });
+
+  if (diffMs < 36 * 3600 * 1000) {
+    return `${dayLabel} at ${timeStr} (in ${formatDuration(diffMs / 3600000)})`;
+  }
+  return `${dayLabel} at ${timeStr}`;
+}
+
+function formatAmount(inches: number, ratePerHour: number) {
+  const rate = ratePerHour || 0.5;
+  const mins = Math.max(1, Math.round((inches / rate) * 60));
+  return `${inches.toFixed(2)}" (≈${mins} min)`;
 }
 
 function phaseName(phase: number) {
@@ -232,7 +260,8 @@ Deno.serve(async (req: Request) => {
     }
 
     const meta = STATUS_META[status.key];
-    const nextDueText = `Next watering: ${formatNextDue(schedule.nextDueAt)}, ~${schedule.sessionAmountInches.toFixed(2)}"`;
+    const tz = weather.timezone || 'UTC';
+    const nextDueText = `Next watering: ${formatNextDue(schedule.nextDueAt, tz)} — ${formatAmount(schedule.sessionAmountInches, settings.sprinkler_rate_inches_per_hour)}`;
     const subject = `${meta.emoji} ${meta.label} — Day ${phaseInfo.daysSince} (${phaseName(phaseInfo.phase)})`;
     const html = `<p><strong>${meta.emoji} ${meta.label}</strong></p><p>${status.detail}</p><p>${nextDueText}</p><p style="color:#64748b;font-size:13px">Day ${phaseInfo.daysSince} of establishment · ${phaseName(phaseInfo.phase)} phase</p>`;
 

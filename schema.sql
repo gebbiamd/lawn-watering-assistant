@@ -50,6 +50,7 @@ create table if not exists lawn_settings (
   root_dev_weekly_inches float not null default 1.0, -- Phase 2 weekly target
   germination_sessions_per_day int not null default 3, -- Phase 1 watering frequency
   establishment_interval_days float not null default 3.5, -- Phase 3 (and Phase 2 taper target) watering interval
+  sprinkler_rate_inches_per_hour float not null default 0.5, -- used to convert recommended inches -> minutes
   latitude float,
   longitude float,
   alert_email text,
