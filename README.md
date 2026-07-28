@@ -31,11 +31,13 @@ To test without waiting for the cron, from the Dashboard's function page use "In
 
 ## 2. Using the app
 
-- **Dashboard** shows your current phase ("Day N · Germination/Root Development/Establishment"), a status pill, and metrics that adapt to the phase (moisture in the last 8h during germination, today's progress during root development, weekly cumulative progress once established).
+- **Dashboard** shows your current phase ("Day N · Germination/Root Development/Establishment"), a status pill with both the current recommendation *and* a "Next watering: {when}, ~{amount}"" line, and metrics that adapt to the phase (moisture in the last 8h during germination, today's progress during root development, weekly cumulative progress once established).
+- **Frequency, not just amount:** watering cadence is phase-driven — Germination waters `germination_sessions_per_day` times/day (default 3, light sessions), Root Development tapers daily → every-other-day as it approaches Establishment, and Establishment waters every `establishment_interval_days` (default 3.5, ~2×/week), deep sessions. Both settings are editable in Setup and per-grass-type presets.
+- **Rain-skip is gated on both amount and confidence:** the app already used the forecasted *amount* of rain (not just the % chance) to decide whether to skip — now it also requires the probability to clear 40% before skipping, so a low-confidence forecast won't cancel a needed watering.
 - **+ button** logs a manual irrigation or rain entry — enter inches directly, or minutes at your sprinkler's inches/hour rate.
 - **Notification Center** always shows the current recommendation plus the last few emails the background job sent, so nothing is hidden even if you skip email.
 - **Enable Alerts** requests browser notification permission for foreground/backgrounded alerts while the app is open.
-- **⚙️ gear icon** re-opens Setup to edit seed date, grass type, phase-length thresholds, weekly targets, location, or alert email at any time.
+- **⚙️ gear icon** re-opens Setup to edit seed date, grass type, phase-length thresholds, weekly/session targets, watering frequency, location, or alert email at any time.
 
 ## 3. Installing on your iPhone (PWA feel)
 

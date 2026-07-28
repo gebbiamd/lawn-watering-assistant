@@ -18,6 +18,7 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 
 const SATURATION_48H_THRESHOLD = 0.50;
 const RAIN_FORECAST_THRESHOLD = 0.25;
+const RAIN_PROBABILITY_GATE_PCT = 40;
 const MOISTURE_LOOKBACK_HOURS = 8;
 const MOISTURE_LOOKBACK_THRESHOLD = 0.05;
 const DEDUPE_WINDOW_HOURS = 4;
@@ -75,9 +76,11 @@ function computeMetrics(weather: any, logs: any[]) {
   const rain48h = sumHourly(weather, 48);
   const rainWeek = sumDailyTrailing(weather, 7);
   const forecastToday = weather.daily.precipitation_sum[weather.daily.precipitation_sum.length - 1] || 0;
+  const forecastProbability = weather.daily.precipitation_probability_max?.[weather.daily.precipitation_probability_max.length - 1] ?? 100;
 
   return {
     forecastToday,
+    forecastProbability,
     combined8h: rain8h + sumLogs(logs, 8),
     combined24h: rain24h + sumLogs(logs, 24),
     combined48h: rain48h + sumLogs(logs, 48),
@@ -88,8 +91,8 @@ function computeMetrics(weather: any, logs: any[]) {
 function computeStatus(settings: any, phaseInfo: any, metrics: any) {
   const { phase } = phaseInfo;
 
-  if (metrics.forecastToday > RAIN_FORECAST_THRESHOLD) {
-    return { key: 'skip_rain', detail: `${metrics.forecastToday.toFixed(2)}" of rain forecasted today.` };
+  if (metrics.forecastToday > RAIN_FORECAST_THRESHOLD && metrics.forecastProbability >= RAIN_PROBABILITY_GATE_PCT) {
+    return { key: 'skip_rain', detail: `${metrics.forecastToday.toFixed(2)}" of rain forecasted today (${Math.round(metrics.forecastProbability)}% chance).` };
   }
 
   if (phase === 1) {
@@ -117,6 +120,58 @@ function computeStatus(settings: any, phaseInfo: any, metrics: any) {
   }
   const deficit = settings.weekly_target_inches - metrics.combinedWeek;
   return { key: 'water_now_weekly', detail: `${deficit.toFixed(2)}" still needed this week (${metrics.combinedWeek.toFixed(2)}" / ${settings.weekly_target_inches}").` };
+}
+
+function computeLastWetAt(weather: any, logs: any[]) {
+  const times: string[] = weather.hourly.time;
+  const precip: number[] = weather.hourly.precipitation;
+  const now = Date.now();
+  let lastRain: number | null = null;
+  for (let i = times.length - 1; i >= 0; i--) {
+    const t = new Date(times[i]).getTime();
+    if (t > now) continue;
+    if ((precip[i] || 0) >= 0.01) { lastRain = t; break; }
+  }
+  const lastLog = logs.length ? new Date(logs[0].created_at).getTime() : null;
+  const candidates = [lastRain, lastLog].filter((v): v is number => v !== null);
+  return candidates.length ? new Date(Math.max(...candidates)) : null;
+}
+
+function computeSchedule(settings: any, phaseInfo: any, weather: any, logs: any[]) {
+  const lastWetAt = computeLastWetAt(weather, logs);
+  let intervalHours: number, sessionAmountInches: number;
+
+  if (phaseInfo.phase === 1) {
+    intervalHours = 24 / settings.germination_sessions_per_day;
+    sessionAmountInches = MOISTURE_LOOKBACK_THRESHOLD;
+  } else if (phaseInfo.phase === 2) {
+    const span = Math.max(1, settings.phase2_end_day - settings.phase1_end_day);
+    const t = Math.min(1, Math.max(0, (phaseInfo.daysSince - settings.phase1_end_day) / span));
+    const startHours = 24;
+    const endHours = settings.establishment_interval_days * 24;
+    intervalHours = startHours + t * (endHours - startHours);
+    sessionAmountInches = settings.root_dev_weekly_inches * (intervalHours / 168);
+  } else {
+    intervalHours = settings.establishment_interval_days * 24;
+    sessionAmountInches = settings.weekly_target_inches * (intervalHours / 168);
+  }
+
+  const nextDueAt = lastWetAt
+    ? new Date(lastWetAt.getTime() + intervalHours * 3600 * 1000)
+    : new Date();
+  return { intervalHours, sessionAmountInches, lastWetAt, nextDueAt };
+}
+
+function formatNextDue(date: Date) {
+  const now = new Date();
+  if (date <= now) return 'today';
+  const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const startOfTarget = new Date(date.getFullYear(), date.getMonth(), date.getDate());
+  const diffDays = Math.round((startOfTarget.getTime() - startOfToday.getTime()) / 86400000);
+  if (diffDays === 0) return 'today';
+  if (diffDays === 1) return 'tomorrow';
+  if (diffDays <= 6) return date.toLocaleDateString('en-US', { weekday: 'long' });
+  return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
 }
 
 function phaseName(phase: number) {
@@ -149,12 +204,13 @@ Deno.serve(async (req: Request) => {
     const since = new Date(Date.now() - 8 * 24 * 3600 * 1000).toISOString();
     const { data: logs } = await supabase.from('water_logs').select('*').gte('created_at', since);
 
-    const weatherUrl = `https://api.open-meteo.com/v1/forecast?latitude=${settings.latitude}&longitude=${settings.longitude}&hourly=precipitation&daily=precipitation_sum&precipitation_unit=inch&past_days=7&forecast_days=1&timezone=auto`;
+    const weatherUrl = `https://api.open-meteo.com/v1/forecast?latitude=${settings.latitude}&longitude=${settings.longitude}&hourly=precipitation&daily=precipitation_sum,precipitation_probability_max&precipitation_unit=inch&past_days=7&forecast_days=1&timezone=auto`;
     const weatherRes = await fetch(weatherUrl);
     const weather = await weatherRes.json();
 
     const metrics = computeMetrics(weather, logs || []);
     const status = computeStatus(settings, phaseInfo, metrics);
+    const schedule = computeSchedule(settings, phaseInfo, weather, logs || []);
 
     if (!NOTIFIABLE_KEYS.has(status.key)) {
       return Response.json({ ok: true, sent: false, reason: 'status not actionable', status: status.key });
@@ -176,8 +232,9 @@ Deno.serve(async (req: Request) => {
     }
 
     const meta = STATUS_META[status.key];
+    const nextDueText = `Next watering: ${formatNextDue(schedule.nextDueAt)}, ~${schedule.sessionAmountInches.toFixed(2)}"`;
     const subject = `${meta.emoji} ${meta.label} — Day ${phaseInfo.daysSince} (${phaseName(phaseInfo.phase)})`;
-    const html = `<p><strong>${meta.emoji} ${meta.label}</strong></p><p>${status.detail}</p><p style="color:#64748b;font-size:13px">Day ${phaseInfo.daysSince} of establishment · ${phaseName(phaseInfo.phase)} phase</p>`;
+    const html = `<p><strong>${meta.emoji} ${meta.label}</strong></p><p>${status.detail}</p><p>${nextDueText}</p><p style="color:#64748b;font-size:13px">Day ${phaseInfo.daysSince} of establishment · ${phaseName(phaseInfo.phase)} phase</p>`;
 
     const resendRes = await fetch('https://api.resend.com/emails', {
       method: 'POST',
@@ -201,7 +258,7 @@ Deno.serve(async (req: Request) => {
     await supabase.from('alert_history').insert({
       phase: phaseName(phaseInfo.phase),
       status_key: status.key,
-      status_text: `${meta.label} — ${status.detail}`,
+      status_text: `${meta.label} — ${status.detail} ${nextDueText}.`,
     });
 
     return Response.json({ ok: true, sent: true, status: status.key });
