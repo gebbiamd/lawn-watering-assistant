@@ -275,20 +275,24 @@ const MOISTURE_DECAY = 0.75;
 const CHART_COLOR_RAIN = '#2a78d6';
 const CHART_COLOR_MOISTURE = '#1baf7a';
 
+// Urgency-driven, not threshold-driven — same pct/overdue signal that drives the
+// moisture gauge, so the banner can never say "Skip" while the gauge says "Getting Dry".
+const URGENCY_SOON_PCT = 20; // below this % remaining in the interval, start warning
+
 const STATUS_META = {
-  skip_rain:        { emoji: '🔵', label: 'SKIP - RAIN FORECASTED', color: 'blue' },
-  skip_saturated:   { emoji: '🔵', label: 'SKIP WATERING',           color: 'blue' },
-  water_now_mist:   { emoji: '🟡', label: 'Water Now (Light Mist)',  color: 'yellow' },
-  skip_moist:       { emoji: '🟢', label: 'Soil Moist — Skip',       color: 'green' },
-  water_now_deep:   { emoji: '🟡', label: 'Water Now (Deep Session)',color: 'yellow' },
-  on_track_today:   { emoji: '🟢', label: 'On Track Today',          color: 'green' },
-  water_now_weekly: { emoji: '🟢', label: 'Safe to Water',           color: 'green' },
-  on_track_week:    { emoji: '🟢', label: 'Target Met This Week',    color: 'green' },
+  skip_rain:         { emoji: '🔵', label: 'SKIP - RAIN FORECASTED',      color: 'blue' },
+  skip_saturated:    { emoji: '🔵', label: 'SKIP WATERING',                color: 'blue' },
+  water_now_critical:{ emoji: '🔴', label: 'Critically Dry — Water Now',   color: 'red' },
+  water_now:         { emoji: '🟠', label: 'Water Now',                    color: 'orange' },
+  water_soon:        { emoji: '🟡', label: 'Water Soon',                   color: 'yellow' },
+  on_track:          { emoji: '🟢', label: 'On Track',                     color: 'green' },
 };
-const NOTIFIABLE_KEYS = new Set(['water_now_mist', 'water_now_deep', 'water_now_weekly', 'skip_rain', 'skip_saturated']);
+const NOTIFIABLE_KEYS = new Set(['water_now_critical', 'water_now', 'water_soon', 'skip_rain', 'skip_saturated']);
 const PILL_CLASSES = {
   green:  'bg-emerald-50 ring-emerald-200 text-emerald-800',
   yellow: 'bg-amber-50 ring-amber-200 text-amber-800',
+  orange: 'bg-orange-50 ring-orange-200 text-orange-800',
+  red:    'bg-red-50 ring-red-200 text-red-800',
   blue:   'bg-sky-50 ring-sky-200 text-sky-800',
 };
 
@@ -430,39 +434,56 @@ function computeMetrics(settings, weather, logs, todayIdx) {
   };
 }
 
-function computeStatus(settings, phaseInfo, metrics) {
+// Urgency (water_now / water_soon / on_track) always comes from the same
+// pct/overdue signal as the moisture gauge — computeMoistureLevel below —
+// so the banner and the gauge can never disagree. Phase only changes the
+// *detail* wording (what "watering" means at this stage), not the urgency.
+function computeStatus(settings, phaseInfo, metrics, schedule) {
   const { phase } = phaseInfo;
 
   if (metrics.forecastToday > RAIN_FORECAST_THRESHOLD && metrics.forecastProbability >= RAIN_PROBABILITY_GATE_PCT) {
     return { key: 'skip_rain', detail: `${metrics.forecastToday.toFixed(2)}" of rain forecasted today (${Math.round(metrics.forecastProbability)}% chance).` };
   }
-
-  if (phase === 1) {
-    if (metrics.combined8h >= MOISTURE_LOOKBACK_THRESHOLD) {
-      return { key: 'skip_moist', detail: `${metrics.combined8h.toFixed(2)}" of moisture in the last ${MOISTURE_LOOKBACK_HOURS}h.` };
-    }
-    return { key: 'water_now_mist', detail: 'Keep the top ½" of soil moist — short 5–10 min mist.' };
-  }
-
   if (metrics.combined48h > SATURATION_48H_THRESHOLD) {
     const skipHours = metrics.combined48h > 1.0 ? 48 : 24;
     return { key: 'skip_saturated', detail: `${metrics.combined48h.toFixed(2)}" received in the last 48h. Re-check in ${skipHours}h.` };
   }
 
+  const { pct, overdueHours } = computeMoistureLevel(schedule);
+  const urgency = overdueHours > 0
+    ? (overdueHours > schedule.intervalHours * 0.5 ? 'critical' : 'now')
+    : (pct < URGENCY_SOON_PCT ? 'soon' : 'ok');
+
+  if (phase === 1) {
+    if (urgency === 'critical' || urgency === 'now') {
+      return { key: urgency === 'critical' ? 'water_now_critical' : 'water_now', detail: 'Keep the top ½" of soil moist — short 5–10 min mist now.' };
+    }
+    if (urgency === 'soon') {
+      return { key: 'water_soon', detail: `Top layer is starting to dry — mist again ${formatNextDue(schedule.nextDueAt)}.` };
+    }
+    return { key: 'on_track', detail: `Soil moist — ${metrics.combined8h.toFixed(2)}" in the last ${MOISTURE_LOOKBACK_HOURS}h.` };
+  }
+
   if (phase === 2) {
     const dailyTarget = settings.root_dev_weekly_inches / 7;
-    if (metrics.combined24h >= dailyTarget) {
-      return { key: 'on_track_today', detail: `${metrics.combined24h.toFixed(2)}" today (target ${dailyTarget.toFixed(2)}").` };
+    if (urgency === 'critical' || urgency === 'now') {
+      return { key: urgency === 'critical' ? 'water_now_critical' : 'water_now', detail: `${metrics.combined24h.toFixed(2)}" today so far — target ${dailyTarget.toFixed(2)}", time for a deeper session.` };
     }
-    return { key: 'water_now_deep', detail: `${metrics.combined24h.toFixed(2)}" today so far — target ${dailyTarget.toFixed(2)}", one deeper session.` };
+    if (urgency === 'soon') {
+      return { key: 'water_soon', detail: `Approaching today's watering window — due ${formatNextDue(schedule.nextDueAt)}.` };
+    }
+    return { key: 'on_track', detail: `${metrics.combined24h.toFixed(2)}" today so far — on pace for ${settings.root_dev_weekly_inches}"/wk.` };
   }
 
   // phase 3 — establishment
-  if (metrics.combinedWeek >= settings.weekly_target_inches) {
-    return { key: 'on_track_week', detail: `${metrics.combinedWeek.toFixed(2)}" of ${settings.weekly_target_inches}" this week.` };
+  const deficit = Math.max(0, settings.weekly_target_inches - metrics.combinedWeek);
+  if (urgency === 'critical' || urgency === 'now') {
+    return { key: urgency === 'critical' ? 'water_now_critical' : 'water_now', detail: `${deficit.toFixed(2)}" still needed this week (${metrics.combinedWeek.toFixed(2)}" / ${settings.weekly_target_inches}").` };
   }
-  const deficit = settings.weekly_target_inches - metrics.combinedWeek;
-  return { key: 'water_now_weekly', detail: `${deficit.toFixed(2)}" still needed this week (${metrics.combinedWeek.toFixed(2)}" / ${settings.weekly_target_inches}").` };
+  if (urgency === 'soon') {
+    return { key: 'water_soon', detail: `Approaching this week's watering window — due ${formatNextDue(schedule.nextDueAt)}.` };
+  }
+  return { key: 'on_track', detail: `${metrics.combinedWeek.toFixed(2)}" of ${settings.weekly_target_inches}" this week.` };
 }
 
 // ---------------------------------------------------------------------
@@ -1077,9 +1098,9 @@ async function refreshAll() {
     const todayIdx = getTodayIdx(weather);
     const phaseInfo = getPhase(settings);
     const metrics = computeMetrics(settings, weather, logs, todayIdx);
-    const status = computeStatus(settings, phaseInfo, metrics);
     const schedule = computeSchedule(settings, phaseInfo, weather, logs);
     state.schedule = schedule;
+    const status = computeStatus(settings, phaseInfo, metrics, schedule);
 
     renderDashboard(settings, phaseInfo, metrics, status, schedule);
     renderMoistureGauge(schedule);

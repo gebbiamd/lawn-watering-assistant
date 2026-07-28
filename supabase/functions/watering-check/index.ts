@@ -22,19 +22,18 @@ const RAIN_PROBABILITY_GATE_PCT = 40;
 const MOISTURE_LOOKBACK_HOURS = 8;
 const MOISTURE_LOOKBACK_THRESHOLD = 0.05;
 const DEDUPE_WINDOW_HOURS = 4;
+const URGENCY_SOON_PCT = 20;
 
 const STATUS_META: Record<string, { emoji: string; label: string }> = {
-  skip_rain:        { emoji: '🔵', label: 'SKIP - RAIN FORECASTED' },
-  skip_saturated:   { emoji: '🔵', label: 'SKIP WATERING' },
-  water_now_mist:   { emoji: '🟡', label: 'Water Now (Light Mist)' },
-  skip_moist:       { emoji: '🟢', label: 'Soil Moist — Skip' },
-  water_now_deep:   { emoji: '🟡', label: 'Water Now (Deep Session)' },
-  on_track_today:   { emoji: '🟢', label: 'On Track Today' },
-  water_now_weekly: { emoji: '🟢', label: 'Safe to Water' },
-  on_track_week:    { emoji: '🟢', label: 'Target Met This Week' },
+  skip_rain:          { emoji: '🔵', label: 'SKIP - RAIN FORECASTED' },
+  skip_saturated:     { emoji: '🔵', label: 'SKIP WATERING' },
+  water_now_critical: { emoji: '🔴', label: 'Critically Dry — Water Now' },
+  water_now:          { emoji: '🟠', label: 'Water Now' },
+  water_soon:         { emoji: '🟡', label: 'Water Soon' },
+  on_track:           { emoji: '🟢', label: 'On Track' },
 };
 const NOTIFIABLE_KEYS = new Set([
-  'water_now_mist', 'water_now_deep', 'water_now_weekly', 'skip_rain', 'skip_saturated',
+  'water_now_critical', 'water_now', 'water_soon', 'skip_rain', 'skip_saturated',
 ]);
 
 function getPhase(settings: any) {
@@ -88,38 +87,63 @@ function computeMetrics(weather: any, logs: any[]) {
   };
 }
 
-function computeStatus(settings: any, phaseInfo: any, metrics: any) {
+function computeMoistureLevel(schedule: { lastWetAt: Date | null; intervalHours: number }) {
+  if (!schedule.lastWetAt) return { pct: 0, overdueHours: schedule.intervalHours };
+  const elapsedHours = (Date.now() - schedule.lastWetAt.getTime()) / 3600000;
+  const pct = Math.max(0, Math.min(100, 100 - (elapsedHours / schedule.intervalHours) * 100));
+  const overdueHours = Math.max(0, elapsedHours - schedule.intervalHours);
+  return { pct, overdueHours };
+}
+
+// Urgency (water_now / water_soon / on_track) comes from the same pct/overdue
+// signal the app's moisture gauge uses, so the emailed status can never say
+// "skip" for a routine near-due check — that word is reserved for the two
+// genuine over-hydration cases (rain forecast, 48h saturation).
+function computeStatus(settings: any, phaseInfo: any, metrics: any, schedule: any) {
   const { phase } = phaseInfo;
 
   if (metrics.forecastToday > RAIN_FORECAST_THRESHOLD && metrics.forecastProbability >= RAIN_PROBABILITY_GATE_PCT) {
     return { key: 'skip_rain', detail: `${metrics.forecastToday.toFixed(2)}" of rain forecasted today (${Math.round(metrics.forecastProbability)}% chance).` };
   }
-
-  if (phase === 1) {
-    if (metrics.combined8h >= MOISTURE_LOOKBACK_THRESHOLD) {
-      return { key: 'skip_moist', detail: `${metrics.combined8h.toFixed(2)}" of moisture in the last ${MOISTURE_LOOKBACK_HOURS}h.` };
-    }
-    return { key: 'water_now_mist', detail: 'Keep the top ½" of soil moist — short 5–10 min mist.' };
-  }
-
   if (metrics.combined48h > SATURATION_48H_THRESHOLD) {
     const skipHours = metrics.combined48h > 1.0 ? 48 : 24;
     return { key: 'skip_saturated', detail: `${metrics.combined48h.toFixed(2)}" received in the last 48h. Re-check in ${skipHours}h.` };
   }
 
-  if (phase === 2) {
-    const dailyTarget = settings.root_dev_weekly_inches / 7;
-    if (metrics.combined24h >= dailyTarget) {
-      return { key: 'on_track_today', detail: `${metrics.combined24h.toFixed(2)}" today (target ${dailyTarget.toFixed(2)}").` };
+  const { pct, overdueHours } = computeMoistureLevel(schedule);
+  const urgency = overdueHours > 0
+    ? (overdueHours > schedule.intervalHours * 0.5 ? 'critical' : 'now')
+    : (pct < URGENCY_SOON_PCT ? 'soon' : 'ok');
+
+  if (phase === 1) {
+    if (urgency === 'critical' || urgency === 'now') {
+      return { key: urgency === 'critical' ? 'water_now_critical' : 'water_now', detail: 'Keep the top ½" of soil moist — short 5–10 min mist now.' };
     }
-    return { key: 'water_now_deep', detail: `${metrics.combined24h.toFixed(2)}" today so far — target ${dailyTarget.toFixed(2)}", one deeper session.` };
+    if (urgency === 'soon') {
+      return { key: 'water_soon', detail: 'Top layer is starting to dry.' };
+    }
+    return { key: 'on_track', detail: `Soil moist — ${metrics.combined8h.toFixed(2)}" in the last ${MOISTURE_LOOKBACK_HOURS}h.` };
   }
 
-  if (metrics.combinedWeek >= settings.weekly_target_inches) {
-    return { key: 'on_track_week', detail: `${metrics.combinedWeek.toFixed(2)}" of ${settings.weekly_target_inches}" this week.` };
+  if (phase === 2) {
+    const dailyTarget = settings.root_dev_weekly_inches / 7;
+    if (urgency === 'critical' || urgency === 'now') {
+      return { key: urgency === 'critical' ? 'water_now_critical' : 'water_now', detail: `${metrics.combined24h.toFixed(2)}" today so far — target ${dailyTarget.toFixed(2)}", time for a deeper session.` };
+    }
+    if (urgency === 'soon') {
+      return { key: 'water_soon', detail: "Approaching today's watering window." };
+    }
+    return { key: 'on_track', detail: `${metrics.combined24h.toFixed(2)}" today so far — on pace for ${settings.root_dev_weekly_inches}"/wk.` };
   }
-  const deficit = settings.weekly_target_inches - metrics.combinedWeek;
-  return { key: 'water_now_weekly', detail: `${deficit.toFixed(2)}" still needed this week (${metrics.combinedWeek.toFixed(2)}" / ${settings.weekly_target_inches}").` };
+
+  const deficit = Math.max(0, settings.weekly_target_inches - metrics.combinedWeek);
+  if (urgency === 'critical' || urgency === 'now') {
+    return { key: urgency === 'critical' ? 'water_now_critical' : 'water_now', detail: `${deficit.toFixed(2)}" still needed this week (${metrics.combinedWeek.toFixed(2)}" / ${settings.weekly_target_inches}").` };
+  }
+  if (urgency === 'soon') {
+    return { key: 'water_soon', detail: "Approaching this week's watering window." };
+  }
+  return { key: 'on_track', detail: `${metrics.combinedWeek.toFixed(2)}" of ${settings.weekly_target_inches}" this week.` };
 }
 
 function computeLastWetAt(weather: any, logs: any[]) {
@@ -237,8 +261,8 @@ Deno.serve(async (req: Request) => {
     const weather = await weatherRes.json();
 
     const metrics = computeMetrics(weather, logs || []);
-    const status = computeStatus(settings, phaseInfo, metrics);
     const schedule = computeSchedule(settings, phaseInfo, weather, logs || []);
+    const status = computeStatus(settings, phaseInfo, metrics, schedule);
 
     if (!NOTIFIABLE_KEYS.has(status.key)) {
       return Response.json({ ok: true, sent: false, reason: 'status not actionable', status: status.key });
