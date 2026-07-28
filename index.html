@@ -124,7 +124,26 @@
       </div>
     </div>
 
+    <div class="card rounded-3xl p-4">
+      <div class="flex items-center justify-between mb-3">
+        <h2 class="font-semibold text-sm text-slate-700">🌤️ Forecast</h2>
+        <span id="current-conditions" class="text-xs text-slate-500 font-medium"></span>
+      </div>
+      <div id="forecast-strip" class="flex gap-2 overflow-x-auto pb-1 -mx-1 px-1"></div>
+    </div>
+
     <div id="dashboard-cards" class="grid grid-cols-1 gap-3"></div>
+
+    <div class="card rounded-3xl p-4">
+      <div class="flex items-center justify-between mb-2">
+        <h2 class="font-semibold text-sm text-slate-700">📈 Soil Moisture Trend</h2>
+        <span class="text-[11px] text-slate-400">past 7d · next 5d</span>
+      </div>
+      <div class="h-44">
+        <canvas id="moisture-chart"></canvas>
+      </div>
+      <p class="text-[11px] text-slate-400 mt-2">Estimated index from rainfall + logged watering, with gradual drying — not a lab sensor reading. Dashed = forecast, hasn't happened yet.</p>
+    </div>
 
     <div class="card rounded-3xl p-4">
       <div class="flex items-center justify-between mb-2">
@@ -143,12 +162,15 @@
   <button id="btn-fab" class="fixed bottom-8 right-1/2 translate-x-[9.5rem] w-14 h-14 rounded-full bg-emerald-500 text-white text-3xl font-bold shadow-xl shadow-emerald-500/40 flex items-center justify-center active:scale-95 transition" aria-label="Log water">+</button>
 </template>
 
-<!-- ===================== LOG MODAL TEMPLATE ===================== -->
+<!-- ===================== LOG / EDIT MODAL TEMPLATE ===================== -->
 <template id="tpl-modal">
   <div id="modal-backdrop" class="fixed inset-0 bg-slate-900/40 backdrop-blur-sm flex items-end justify-center z-50">
-    <div class="modal-enter w-full max-w-md bg-white rounded-t-3xl p-5 pb-8 ring-1 ring-slate-100 shadow-2xl">
+    <div class="modal-enter w-full max-w-md bg-white rounded-t-3xl p-5 pb-8 ring-1 ring-slate-100 shadow-2xl max-h-[90vh] overflow-y-auto">
       <div class="w-10 h-1.5 bg-slate-200 rounded-full mx-auto mb-4"></div>
-      <h2 class="text-lg font-bold mb-4 text-slate-900">Log Water</h2>
+      <div class="flex items-center justify-between mb-4">
+        <h2 id="modal-title" class="text-lg font-bold text-slate-900">Log Water</h2>
+        <button id="btn-modal-close" class="text-slate-400 text-2xl leading-none px-1" aria-label="Close">×</button>
+      </div>
       <div class="flex flex-col gap-4">
         <div class="flex gap-2">
           <button data-type="irrigation" class="modal-type-btn flex-1 py-2.5 rounded-xl font-semibold text-sm ring-1">💧 Irrigation</button>
@@ -166,7 +188,18 @@
           <span class="text-sm font-semibold text-slate-700">Notes (optional)</span>
           <input id="in-notes" type="text" placeholder="Front yard, zone 2..." class="bg-slate-50 rounded-xl px-3 py-2.5 text-slate-800 outline-none ring-1 ring-slate-200 focus:ring-2 focus:ring-emerald-400" />
         </label>
+
+        <label class="flex items-center gap-2 select-none">
+          <input id="in-use-now" type="checkbox" checked class="w-4 h-4 rounded accent-emerald-500" />
+          <span class="text-sm font-semibold text-slate-700">Use current date/time</span>
+        </label>
+        <label id="timestamp-wrap" class="flex flex-col gap-1.5 hidden">
+          <span class="text-xs font-semibold text-slate-500">Date &amp; time</span>
+          <input id="in-timestamp" type="datetime-local" class="bg-slate-50 rounded-xl px-3 py-2.5 text-slate-800 outline-none ring-1 ring-slate-200 focus:ring-2 focus:ring-emerald-400" />
+        </label>
+
         <div class="flex gap-3 mt-1">
+          <button id="btn-modal-delete" class="hidden flex-1 py-3 rounded-2xl font-semibold text-red-600 bg-red-50">Delete</button>
           <button id="btn-modal-cancel" class="flex-1 py-3 rounded-2xl font-semibold text-slate-600 bg-slate-100">Cancel</button>
           <button id="btn-modal-save" class="flex-1 py-3 rounded-2xl font-bold text-white bg-emerald-500 shadow-lg shadow-emerald-500/25">Save</button>
         </div>
@@ -177,6 +210,7 @@
 
 <script type="module">
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
+import Chart from 'https://esm.sh/chart.js@4/auto';
 
 // =====================================================================
 // 1. CONFIG — paste your Supabase project URL + anon key here.
@@ -199,6 +233,13 @@ const SATURATION_48H_THRESHOLD = 0.50;
 const RAIN_FORECAST_THRESHOLD = 0.25;
 const MOISTURE_LOOKBACK_HOURS = 8;
 const MOISTURE_LOOKBACK_THRESHOLD = 0.05;
+const PAST_DAYS = 7;
+const FORECAST_DAYS = 5;
+const MOISTURE_DECAY = 0.75;
+
+// Validated categorical pair (blue + aqua, both in inches — one shared axis).
+const CHART_COLOR_RAIN = '#2a78d6';
+const CHART_COLOR_MOISTURE = '#1baf7a';
 
 const STATUS_META = {
   skip_rain:        { emoji: '🔵', label: 'SKIP - RAIN FORECASTED', color: 'blue' },
@@ -217,8 +258,23 @@ const PILL_CLASSES = {
   blue:   'bg-sky-50 ring-sky-200 text-sky-800',
 };
 
+const WEATHER_ICONS = {
+  0: '☀️', 1: '🌤️', 2: '⛅', 3: '☁️',
+  45: '🌫️', 48: '🌫️',
+  51: '🌦️', 53: '🌦️', 55: '🌦️',
+  56: '🌧️', 57: '🌧️',
+  61: '🌧️', 63: '🌧️', 65: '🌧️',
+  66: '🌧️', 67: '🌧️',
+  71: '🌨️', 73: '🌨️', 75: '🌨️', 77: '🌨️',
+  80: '🌦️', 81: '🌧️', 82: '⛈️',
+  85: '🌨️', 86: '🌨️',
+  95: '⛈️', 96: '⛈️', 99: '⛈️',
+};
+function weatherIcon(code) { return WEATHER_ICONS[code] || '🌡️'; }
+
 const root = document.getElementById('root');
 let state = { settings: null, weather: null, logs: [], alerts: [] };
+let moistureChart = null;
 
 // ---------------------------------------------------------------------
 // Data loading
@@ -230,7 +286,11 @@ async function loadSettings() {
 }
 
 async function fetchWeather(lat, lon) {
-  const url = `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&hourly=precipitation&daily=precipitation_sum&past_days=7&forecast_days=1&timezone=auto`;
+  const url = `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}` +
+    `&hourly=precipitation` +
+    `&daily=precipitation_sum,weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max` +
+    `&current=temperature_2m,weather_code` +
+    `&temperature_unit=fahrenheit&precipitation_unit=inch&past_days=${PAST_DAYS}&forecast_days=${FORECAST_DAYS}&timezone=auto`;
   const res = await fetch(url);
   if (!res.ok) throw new Error('Weather fetch failed');
   return res.json();
@@ -269,6 +329,16 @@ function getPhase(settings) {
   return { daysSince: Math.max(daysSince, 0), phase };
 }
 
+function localDateStr(d = new Date()) {
+  const pad = n => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+}
+
+function getTodayIdx(weather) {
+  const idx = weather.daily.time.indexOf(localDateStr());
+  return idx === -1 ? Math.max(0, weather.daily.time.length - FORECAST_DAYS) : idx;
+}
+
 function sumHourly(weather, hours) {
   const times = weather.hourly.time;
   const precip = weather.hourly.precipitation;
@@ -282,10 +352,17 @@ function sumHourly(weather, hours) {
   return sum;
 }
 
-function sumDailyTrailing(weather, days) {
+function sumDailyRange(weather, endIdx, days) {
   const vals = weather.daily.precipitation_sum;
-  const slice = vals.slice(Math.max(0, vals.length - days));
-  return slice.reduce((a, b) => a + (b || 0), 0);
+  const start = Math.max(0, endIdx - days + 1);
+  return vals.slice(start, endIdx + 1).reduce((a, b) => a + (b || 0), 0);
+}
+
+function sumDailyForward(weather, startIdx, days) {
+  const vals = weather.daily.precipitation_sum;
+  const end = Math.min(vals.length - 1, startIdx + days - 1);
+  if (startIdx > end) return 0;
+  return vals.slice(startIdx, end + 1).reduce((a, b) => a + (b || 0), 0);
 }
 
 function sumLogs(logs, hours, types = ['rain', 'irrigation']) {
@@ -295,12 +372,12 @@ function sumLogs(logs, hours, types = ['rain', 'irrigation']) {
     .reduce((a, l) => a + l.amount_inches, 0);
 }
 
-function computeMetrics(settings, weather, logs) {
+function computeMetrics(settings, weather, logs, todayIdx) {
   const rain8h = sumHourly(weather, MOISTURE_LOOKBACK_HOURS);
   const rain24h = sumHourly(weather, 24);
   const rain48h = sumHourly(weather, 48);
-  const rainWeek = sumDailyTrailing(weather, 7);
-  const forecastToday = weather.daily.precipitation_sum[weather.daily.precipitation_sum.length - 1] || 0;
+  const rainWeek = sumDailyRange(weather, todayIdx, 7);
+  const forecastToday = weather.daily.precipitation_sum[todayIdx] || 0;
 
   const logs8h = sumLogs(logs, 8);
   const logs24h = sumLogs(logs, 24);
@@ -352,7 +429,7 @@ function computeStatus(settings, phaseInfo, metrics) {
   return { key: 'water_now_weekly', detail: `${deficit.toFixed(2)}" still needed this week (${metrics.combinedWeek.toFixed(2)}" / ${settings.weekly_target_inches}").` };
 }
 
-function buildNotifications(settings, phaseInfo, metrics, status, recentAlerts) {
+function buildNotifications(settings, phaseInfo, metrics, status, recentAlerts, weather, todayIdx) {
   const items = [];
   const meta = STATUS_META[status.key];
   items.push(`${meta.emoji} ${meta.label} — ${status.detail}`);
@@ -362,6 +439,11 @@ function buildNotifications(settings, phaseInfo, metrics, status, recentAlerts) 
   }
   if (metrics.combined48h > SATURATION_48H_THRESHOLD && status.key !== 'skip_saturated') {
     items.push(`⚠️ ${metrics.combined48h.toFixed(2)}" detected in the last 48h.`);
+  }
+
+  const upcoming = sumDailyForward(weather, todayIdx + 1, 3);
+  if (upcoming > 0.1) {
+    items.push(`🔮 ${upcoming.toFixed(2)}" more rain expected over the next 3 days — factored into the trend chart below.`);
   }
 
   const nextCutoff = phaseInfo.phase === 1 ? settings.phase1_end_day : phaseInfo.phase === 2 ? settings.phase2_end_day : null;
@@ -393,6 +475,11 @@ function relativeTime(iso) {
 
 function phaseName(phase) {
   return phase === 1 ? 'Germination' : phase === 2 ? 'Root Development' : 'Establishment';
+}
+
+function toDatetimeLocal(date) {
+  const pad = n => String(n).padStart(2, '0');
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
 }
 
 function renderSetup(prefill) {
@@ -477,7 +564,7 @@ function renderApp() {
   root.innerHTML = '';
   root.appendChild(document.getElementById('tpl-app').content.cloneNode(true));
   document.getElementById('btn-settings').addEventListener('click', () => renderSetup(state.settings));
-  document.getElementById('btn-fab').addEventListener('click', openModal);
+  document.getElementById('btn-fab').addEventListener('click', () => openModal());
   document.getElementById('btn-enable-notif').addEventListener('click', async () => {
     if (!('Notification' in window)) return alert('Notifications not supported on this browser.');
     await Notification.requestPermission();
@@ -520,6 +607,113 @@ function renderDashboard(settings, phaseInfo, metrics, status) {
   cards.appendChild(card('Forecast Today', `${metrics.forecastToday.toFixed(2)}"`));
 }
 
+function renderCurrentConditions(weather) {
+  const el = document.getElementById('current-conditions');
+  if (!el || !weather.current) return;
+  el.textContent = `Now ${Math.round(weather.current.temperature_2m)}° ${weatherIcon(weather.current.weather_code)}`;
+}
+
+function renderForecastStrip(weather, todayIdx) {
+  const el = document.getElementById('forecast-strip');
+  if (!el) return;
+  el.innerHTML = '';
+  const days = weather.daily.time;
+  const hi = weather.daily.temperature_2m_max;
+  const lo = weather.daily.temperature_2m_min;
+  const pop = weather.daily.precipitation_probability_max;
+  const code = weather.daily.weather_code;
+  for (let i = todayIdx; i < days.length; i++) {
+    const label = i === todayIdx ? 'Today' : new Date(days[i] + 'T00:00:00').toLocaleDateString(undefined, { weekday: 'short' });
+    const div = document.createElement('div');
+    div.className = 'flex flex-col items-center gap-1 bg-slate-50 rounded-2xl px-3 py-3 min-w-[64px] ring-1 ring-slate-100 shrink-0';
+    div.innerHTML = `<div class="text-xs font-semibold text-slate-500">${label}</div>
+      <div class="text-2xl">${weatherIcon(code[i])}</div>
+      <div class="text-sm font-bold text-slate-800">${Math.round(hi[i])}°</div>
+      <div class="text-xs text-slate-400">${Math.round(lo[i])}°</div>
+      <div class="text-xs text-sky-600 font-medium">💧${Math.round(pop[i] ?? 0)}%</div>`;
+    el.appendChild(div);
+  }
+}
+
+function computeMoistureSeries(weather, logs, todayIdx) {
+  const dates = weather.daily.time;
+  const rain = weather.daily.precipitation_sum;
+  const loggedByDate = {};
+  for (const l of logs) {
+    const d = localDateStr(new Date(l.created_at));
+    loggedByDate[d] = (loggedByDate[d] || 0) + l.amount_inches;
+  }
+  let moisture = 0;
+  const series = [];
+  for (let i = 0; i < dates.length; i++) {
+    const input = (rain[i] || 0) + (loggedByDate[dates[i]] || 0);
+    moisture = i === 0 ? input : moisture * MOISTURE_DECAY + input;
+    series.push(Number(moisture.toFixed(3)));
+  }
+  return series;
+}
+
+function renderMoistureChart(weather, logs, todayIdx) {
+  const canvas = document.getElementById('moisture-chart');
+  if (!canvas) return;
+  const dates = weather.daily.time;
+  const series = computeMoistureSeries(weather, logs, todayIdx);
+  const rainData = weather.daily.precipitation_sum;
+  const labels = dates.map((d, i) => i === todayIdx ? 'Today' : new Date(d + 'T00:00:00').toLocaleDateString(undefined, { weekday: 'short' }));
+
+  if (moistureChart) { moistureChart.destroy(); moistureChart = null; }
+
+  moistureChart = new Chart(canvas.getContext('2d'), {
+    data: {
+      labels,
+      datasets: [
+        {
+          type: 'bar',
+          label: 'Rain (in)',
+          data: rainData,
+          backgroundColor: CHART_COLOR_RAIN,
+          borderRadius: { topLeft: 4, topRight: 4 },
+          borderSkipped: 'bottom',
+          maxBarThickness: 16,
+          order: 2,
+        },
+        {
+          type: 'line',
+          label: 'Moisture Index (in)',
+          data: series,
+          borderColor: CHART_COLOR_MOISTURE,
+          backgroundColor: CHART_COLOR_MOISTURE + '1a',
+          fill: true,
+          tension: 0.3,
+          borderWidth: 2,
+          pointRadius: 3,
+          pointHoverRadius: 6,
+          pointBackgroundColor: CHART_COLOR_MOISTURE,
+          pointBorderColor: '#ffffff',
+          pointBorderWidth: 2,
+          segment: { borderDash: ctx => ctx.p1DataIndex > todayIdx ? [6, 4] : undefined },
+          order: 1,
+        },
+      ],
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      interaction: { mode: 'index', intersect: false },
+      plugins: {
+        legend: { display: true, position: 'top', align: 'end', labels: { boxWidth: 14, boxHeight: 2, font: { size: 11 }, color: '#52514e' } },
+        tooltip: {
+          callbacks: { label: ctx => `${ctx.dataset.label}: ${ctx.parsed.y.toFixed(2)}"` },
+        },
+      },
+      scales: {
+        x: { grid: { display: false }, ticks: { color: '#898781', font: { size: 10 } } },
+        y: { beginAtZero: true, grid: { color: '#e1e0d9' }, ticks: { color: '#898781', font: { size: 10 } } },
+      },
+    },
+  });
+}
+
 function renderNotifications(items) {
   const ul = document.getElementById('notif-list');
   ul.innerHTML = '';
@@ -545,15 +739,19 @@ function renderHistory(logs) {
   }
   for (const l of last5) {
     const li = document.createElement('li');
-    li.className = 'py-2.5 flex items-center justify-between';
-    li.innerHTML = `<div class="flex items-center gap-2">
+    li.className = 'py-2.5 flex items-center justify-between gap-2';
+    li.innerHTML = `<div class="flex items-center gap-2 min-w-0">
         <span>${l.type === 'rain' ? '🌧️' : '💧'}</span>
-        <div>
+        <div class="min-w-0">
           <div class="text-sm font-medium text-slate-800">${l.amount_inches.toFixed(2)}" ${l.type}</div>
-          ${l.notes ? `<div class="text-xs text-slate-400">${escapeHtml(l.notes)}</div>` : ''}
+          ${l.notes ? `<div class="text-xs text-slate-400 truncate">${escapeHtml(l.notes)}</div>` : ''}
         </div>
       </div>
-      <span class="text-xs text-slate-400">${relativeTime(l.created_at)}</span>`;
+      <div class="flex items-center gap-2 shrink-0">
+        <span class="text-xs text-slate-400">${relativeTime(l.created_at)}</span>
+        <button class="edit-entry-btn text-slate-400 hover:text-emerald-600 text-sm px-1" aria-label="Edit entry">✏️</button>
+      </div>`;
+    li.querySelector('.edit-entry-btn').addEventListener('click', () => openModal(l));
     ul.appendChild(li);
   }
 }
@@ -565,20 +763,46 @@ function escapeHtml(s) {
 }
 
 // ---------------------------------------------------------------------
-// Modal
+// Modal (create + edit + delete)
 // ---------------------------------------------------------------------
 let modalType = 'irrigation';
+let editingEntry = null;
 
-function openModal() {
+function openModal(entry = null) {
   document.body.appendChild(document.getElementById('tpl-modal').content.cloneNode(true));
-  modalType = 'irrigation';
+  editingEntry = entry;
+  modalType = entry ? entry.type : 'irrigation';
   updateModalTypeButtons();
+
+  document.getElementById('modal-title').textContent = entry ? 'Edit Entry' : 'Log Water';
+  document.getElementById('btn-modal-delete').classList.toggle('hidden', !entry);
+  document.getElementById('btn-modal-cancel').classList.toggle('hidden', !!entry);
+
+  const amountEl = document.getElementById('in-amount');
+  const notesEl = document.getElementById('in-notes');
+  const useNowEl = document.getElementById('in-use-now');
+  const tsWrap = document.getElementById('timestamp-wrap');
+  const tsInput = document.getElementById('in-timestamp');
+
+  if (entry) {
+    amountEl.value = entry.amount_inches;
+    notesEl.value = entry.notes || '';
+    useNowEl.checked = false;
+    tsWrap.classList.remove('hidden');
+    tsInput.value = toDatetimeLocal(new Date(entry.created_at));
+  } else {
+    tsInput.value = toDatetimeLocal(new Date());
+  }
+
+  useNowEl.addEventListener('change', () => {
+    tsWrap.classList.toggle('hidden', useNowEl.checked);
+    if (!useNowEl.checked && !tsInput.value) tsInput.value = toDatetimeLocal(new Date());
+  });
 
   document.querySelectorAll('.modal-type-btn').forEach(btn => {
     btn.addEventListener('click', () => { modalType = btn.dataset.type; updateModalTypeButtons(); });
   });
 
-  const amountEl = document.getElementById('in-amount');
   const minutesEl = document.getElementById('in-minutes');
   const rateEl = document.getElementById('in-rate');
   minutesEl.addEventListener('input', () => {
@@ -587,9 +811,11 @@ function openModal() {
     if (!isNaN(mins)) amountEl.value = ((mins / 60) * rate).toFixed(2);
   });
 
+  document.getElementById('btn-modal-close').addEventListener('click', closeModal);
   document.getElementById('btn-modal-cancel').addEventListener('click', closeModal);
   document.getElementById('modal-backdrop').addEventListener('click', e => { if (e.target.id === 'modal-backdrop') closeModal(); });
   document.getElementById('btn-modal-save').addEventListener('click', saveModal);
+  document.getElementById('btn-modal-delete').addEventListener('click', deleteModalEntry);
 }
 
 function updateModalTypeButtons() {
@@ -602,14 +828,33 @@ function updateModalTypeButtons() {
 function closeModal() {
   const el = document.getElementById('modal-backdrop');
   if (el) el.remove();
+  editingEntry = null;
 }
 
 async function saveModal() {
   const amount = parseFloat(document.getElementById('in-amount').value);
   if (isNaN(amount) || amount <= 0) return alert('Enter a valid amount in inches.');
   const notes = document.getElementById('in-notes').value || null;
-  const { error } = await supabase.from('water_logs').insert({ type: modalType, amount_inches: amount, notes });
+  const useNow = document.getElementById('in-use-now').checked;
+  const createdAt = useNow ? new Date() : new Date(document.getElementById('in-timestamp').value);
+  if (isNaN(createdAt.getTime())) return alert('Enter a valid date/time.');
+
+  const payload = { type: modalType, amount_inches: amount, notes, created_at: createdAt.toISOString() };
+
+  const { error } = editingEntry
+    ? await supabase.from('water_logs').update(payload).eq('id', editingEntry.id)
+    : await supabase.from('water_logs').insert(payload);
+
   if (error) return alert('Save failed: ' + error.message);
+  closeModal();
+  await refreshAll();
+}
+
+async function deleteModalEntry() {
+  if (!editingEntry) return;
+  if (!confirm('Delete this entry? This cannot be undone.')) return;
+  const { error } = await supabase.from('water_logs').delete().eq('id', editingEntry.id);
+  if (error) return alert('Delete failed: ' + error.message);
   closeModal();
   await refreshAll();
 }
@@ -654,12 +899,16 @@ async function refreshAll() {
     state.logs = logs;
     state.alerts = alerts;
 
+    const todayIdx = getTodayIdx(weather);
     const phaseInfo = getPhase(settings);
-    const metrics = computeMetrics(settings, weather, logs);
+    const metrics = computeMetrics(settings, weather, logs, todayIdx);
     const status = computeStatus(settings, phaseInfo, metrics);
 
     renderDashboard(settings, phaseInfo, metrics, status);
-    renderNotifications(buildNotifications(settings, phaseInfo, metrics, status, alerts));
+    renderCurrentConditions(weather);
+    renderForecastStrip(weather, todayIdx);
+    renderMoistureChart(weather, logs, todayIdx);
+    renderNotifications(buildNotifications(settings, phaseInfo, metrics, status, alerts, weather, todayIdx));
     renderHistory(logs);
     maybeNotify(status);
   } catch (e) {

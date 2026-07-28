@@ -149,7 +149,7 @@ Deno.serve(async (req: Request) => {
     const since = new Date(Date.now() - 8 * 24 * 3600 * 1000).toISOString();
     const { data: logs } = await supabase.from('water_logs').select('*').gte('created_at', since);
 
-    const weatherUrl = `https://api.open-meteo.com/v1/forecast?latitude=${settings.latitude}&longitude=${settings.longitude}&hourly=precipitation&daily=precipitation_sum&past_days=7&forecast_days=1&timezone=auto`;
+    const weatherUrl = `https://api.open-meteo.com/v1/forecast?latitude=${settings.latitude}&longitude=${settings.longitude}&hourly=precipitation&daily=precipitation_sum&precipitation_unit=inch&past_days=7&forecast_days=1&timezone=auto`;
     const weatherRes = await fetch(weatherUrl);
     const weather = await weatherRes.json();
 

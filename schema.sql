@@ -26,6 +26,15 @@ create policy "anon can insert water_logs"
   on water_logs for insert
   with check (true);
 
+create policy "anon can update water_logs"
+  on water_logs for update
+  using (true)
+  with check (true);
+
+create policy "anon can delete water_logs"
+  on water_logs for delete
+  using (true);
+
 -- ---------------------------------------------------------------------------
 -- lawn_settings: single-row configuration shared by the frontend and the
 -- scheduled Edge Function, so both compute the exact same phase/status.
